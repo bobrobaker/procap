@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "procap"
+version = "0.1.0"
+description = "Turn a screenshare of a technical GUI into a time-estimated written procedure."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python-headless",
+    "imagehash",
+    "Pillow",
+    "scikit-image",
+    "anthropic",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+procap = "procap.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["procap*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

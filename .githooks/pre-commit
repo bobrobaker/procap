@@ -1,0 +1,12 @@
+#!/bin/sh
+# Tier-1 enforcement: mechanical invariants block, semantic judgment doesn't.
+# Arm once per clone: git config core.hooksPath .githooks
+ROOT="$(git rev-parse --show-toplevel)"
+python3 "$ROOT/tools/lint.py" || exit 1
+# Derived view: keep the takeaway store reviewable in git diffs.
+if [ -d "$ROOT/monition/.dolt" ] || [ -f "$ROOT/monition/store.db" ]; then
+  command -v monition >/dev/null 2>&1 \
+    && monition dump >/dev/null 2>&1 \
+    && git -C "$ROOT" add monition/dump.sql 2>/dev/null || true
+fi
+exit 0

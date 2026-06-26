@@ -1,0 +1,16 @@
+# venv & python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# pipeline outputs
+runs/
+
+# corpus: synthetic clip is regenerable (kept out of git); real downloads are large/copyright
+corpus/synthetic/*.mp4
+corpus/real/
+
+# the synthetic labels + generator ARE source of truth — keep them
+!corpus/synthetic/*.labels.json
