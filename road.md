@@ -16,7 +16,7 @@ refinable effort inside a phase. A **bucket** is a bounded implementation slice.
 
 ### Phase 1 — Decompose (video → keyframes)
 
-**Status:** done (foundation).
+**Status:** complete (verified on synthetic + a real 3-min KiCad clip).
 
 **Deliverable:** `procap extract VIDEO` samples the video and emits ordered keyframes at
 moments of durable visual change, with timestamps, to a run dir.
@@ -36,18 +36,18 @@ new state then *dwells* (filters transient mid-transition frames). See
 
 ### Phase 2 — Golden / dross classification
 
-`<----- Ongoing phase ----->`
-
-**Status:** in progress (spawned agent).
+**Status:** complete (heuristic baseline; F1 ≥ 0.8 on synthetic). VLM re-judging wired,
+offline-tested only — live validation tracked in Phase 4.
 
 **Deliverable:** `procap golden RUN` partitions the keyframe timeline into golden vs dross
 segments with a reason per segment.
 
 **Surfaces:** `procap/golden.py`, `procap/model.py:Segment,SegmentKind`.
 
-**Design:** heuristic baseline — (a) **revert-detection**: if the state at keyframe *i*
-returns (low perceptual-hash distance) to a pre-excursion state at *j<i*, the excursion
-*j+1..i* is dross; (b) **dwell**: states held < `min_dwell_s` are transient/dross;
+**Design:** heuristic baseline — (a) **revert-detection**: if the state at keyframe *j*
+returns (low changed-pixel fraction, `imageutil.changed_fraction_paths`) to an earlier
+state at *i<j*, the excursion *i+1..j* is dross; (b) **dwell**: states held < `min_dwell_s`
+are transient/dross;
 (c) **wander**: change confined to cursor region with no UI delta is dross. The VLM, when
 keyed, re-judges ambiguous segments. Heuristic must stand alone.
 
@@ -60,7 +60,8 @@ labels (it contains a scripted wrong-click-and-revert excursion + a mouse-wander
 
 ### Phase 3 — Procedure synthesis + audit
 
-**Status:** in progress (spawned agent).
+**Status:** complete (offline skeleton + audit verified end-to-end). VLM titling/description
+and semantic audit wired, offline-tested only — live validation tracked in Phase 4.
 
 **Deliverable:** `procap procedure RUN` emits a time-estimated, ordered procedure (one step
 per golden segment, timestamps → duration estimates, manual `intent` fill-in slots), and
@@ -81,3 +82,34 @@ the omitted step.
 
 **Exit:** end-to-end `procap run` produces a `procedure.md` whose step count equals the
 golden-segment count, and the audit flags the known gap in the sample written doc.
+
+---
+
+### Phase 4 — VLM enrichment hardening
+
+`<----- Ongoing phase ----->`
+
+**Status:** active (frontier; baselines done, this is the quality layer).
+
+**Deliverable:** the VLM enrichment paths validated *live* against the real Anthropic API,
+and golden over-segmentation reduced so a real recording yields logical-action steps rather
+than one step per visual change.
+
+**Surfaces:** `procap/golden.py:refine_with_vlm`, `procap/procedure.py:_describe`,
+`procap/audit.py:_audit_semantic`, `procap/vlm.py:extract_json`.
+
+**Design:** (a) **live-validate** with `ANTHROPIC_API_KEY` set — confirm `extract_json`
+survives real replies (models wrap JSON in prose/fences) and titles/semantic-audit are sound;
+(b) **de-segment** — have the VLM merge/relabel consecutive keyframes belonging to one logical
+action (or mark incidental pan/zoom/panel-toggle as dross). Start conservative (relabel only
+clearly-incidental view changes) before grouping; measure step count on the KiCad clip.
+This is semantic, **not** a threshold change (see `docs/decisions/2026-06-26-real-corpus-findings.md`
+and the `golden.py:classify` row in `debt.md`).
+
+**Validation:** live run on `corpus/synthetic/labeled_demo.mp4` (real titles, not `[fill in]`);
+re-measure golden step count on the real KiCad clip before/after de-segmentation.
+
+**Estimate:** medium.
+
+**Exit:** with a key, `procap run` produces real step titles/descriptions and a semantic audit;
+the KiCad clip's procedure collapses from ~29 steps to a count matching its logical actions.
