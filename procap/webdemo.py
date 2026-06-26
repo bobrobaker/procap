@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
 
-from .model import Procedure, Segment, Keyframe, AuditReport, SegmentKind
+from .model import Procedure, Segment, Keyframe, AuditReport, SegmentKind, FindingKind
 from .eval import score_against_labels
 
 EVAL_STEP = 0.1  # time-grid resolution the scorer uses; reused to convert grid points -> seconds
@@ -176,6 +176,9 @@ header.top .tag { color: #8b949e; font-size: 13px; margin-top: 3px; }
 .cov > span { display: block; height: 100%; background: var(--good); }
 .finding { padding: 10px 12px; border-left: 3px solid var(--warn); background: #fffaf0; border-radius: 0 8px 8px 0; margin-top: 10px; font-size: 13.5px; }
 .finding .k { font-weight: 650; color: var(--warn); text-transform: uppercase; font-size: 11px; letter-spacing: .4px; }
+.findgroup { font-size: 13px; margin: 18px 0 2px; cursor: help; }
+.findgroup .muted { font-weight: 400; }
+.auditcount { font-size: 15px; margin: 6px 0 4px; }
 .empty { color: var(--muted); font-style: italic; }
 .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .3px; vertical-align: 1px; }
 .badge.vlm-on { background: #1a7f37; color: #fff; }
@@ -230,6 +233,15 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
 .disc .lede { margin-top: 0; }
 ol.how { margin: 4px 0 16px; padding-left: 22px; }
 ol.how li { margin: 7px 0; font-size: 14px; }
+.howtrace { font-size: 13.5px; background: var(--dross-bg); border-radius: 8px; padding: 10px 12px; margin: 0 0 16px; }
+.howstage { border-left: 3px solid var(--line); padding: 2px 0 2px 14px; margin: 14px 0; font-size: 13.5px; }
+.howstage h3 { margin: 4px 0 6px; font-size: 15px; }
+.howstage h3 .n { display: inline-block; min-width: 20px; color: var(--accent); font-weight: 700; }
+.howstage p { margin: 5px 0; }
+.howio { color: var(--muted); }
+.howknob code { font-size: 12px; background: var(--dross-bg); padding: 1px 6px; border-radius: 5px; }
+.howlimit { color: var(--warn); }
+.howlink { font-size: 12px; font-weight: 400; margin-left: 6px; }
 dl.faq { margin: 4px 0 16px; }
 dl.faq dt { font-weight: 650; margin-top: 14px; font-size: 14.5px; }
 dl.faq dd { margin: 4px 0 0; color: #2c333a; font-size: 13.8px; }
@@ -257,26 +269,30 @@ def _render_stats(rv: RunView) -> str:
         n_gold = sum(1 for s in rv.segments if s.kind == SegmentKind.GOLDEN)
         n_dross = sum(1 for s in rv.segments if s.kind == SegmentKind.DROSS)
     cells = [
-        ("Duration", _fmt_t(rv.duration)),
-        ("Keyframes", str(len(rv.keyframes))),
-        ("Golden", str(n_gold)),
-        ("Dross", str(n_dross)),
+        ("Duration", _fmt_t(rv.duration), "Total length of the source recording (ffprobe)."),
+        ("Keyframes", str(len(rv.keyframes)), "Frames the screen durably changed to, after de-duplication."),
+        ("Golden", str(n_gold), "Stretches kept as consequential actions."),
+        ("Dross", str(n_dross), "Stretches dropped (reverted, idle, mouse-wander)."),
     ]
     if rv.procedure:
-        cells.append(("Procedure steps", str(len(rv.procedure.steps))))
-        cells.append(("Est. time", _fmt_t(rv.procedure.total_est_seconds)))
+        cells.append(("Procedure steps", str(len(rv.procedure.steps)),
+                      "One step synthesized per kept (golden) keyframe."))
+        cells.append(("Est. time", _fmt_t(rv.procedure.total_est_seconds),
+                      "Sum of step time estimates, carried from segment spans."))
     if rv.audit:
         # Honest headline: a matched-step COUNT, not a green "%coverage" — the % read as a
         # content audit even when it was a positional count. The §4 section carries the method.
+        cov_tip = "Generated steps the written doc covers, out of all generated steps."
         if rv.procedure and rv.procedure.steps:
             n = len(rv.procedure.steps)
             covered = round(rv.audit.coverage * n)
-            cells.append(("Doc steps matched", f"{covered}/{n}"))
+            cells.append(("Doc steps matched", f"{covered}/{n}", cov_tip))
         else:
-            cells.append(("Doc steps matched", f"{rv.audit.coverage*100:.0f}%"))
+            cells.append(("Doc steps matched", f"{rv.audit.coverage*100:.0f}%", cov_tip))
     inner = "".join(
-        f'<div class="stat"><div class="v">{_esc(v)}</div><div class="l">{_esc(l)}</div></div>'
-        for l, v in cells
+        f'<div class="stat" title="{_esc(t)}"><div class="v">{_esc(v)}</div>'
+        f'<div class="l">{_esc(l)}</div></div>'
+        for l, v, t in cells
     )
     return f'<div class="statgrid">{inner}</div>'
 
@@ -337,16 +353,28 @@ def _render_keyframes(rv: RunView) -> str:
                 verdict = f'<span class="pill golden">KEPT</span> → became <b>step {step_of[kf.index]}</b>'
             else:
                 verdict = '<span class="pill dross">DROPPED</span> as dross'
-            why = f"<p><b>Why:</b> {_esc(seg.reason)} <span class='muted'>(judged by {_esc(seg.judged_by)}, conf {seg.confidence:.2f})</span></p>"
+            conf_title = (
+                "Per-segment certainty (~0.5–0.95) from the margin of the heuristic's own "
+                "decision: a bigger/cleaner change or a cleaner revert scores higher."
+            )
+            why = (
+                f"<p><b>Why:</b> {_esc(seg.reason)} "
+                f"<span class='muted' title=\"{conf_title}\">"
+                f"(judged by {_esc(seg.judged_by)}, conf {seg.confidence:.2f})</span></p>"
+            )
         else:
             verdict, why = "<span class='muted'>not yet classified</span>", ""
+        delta_title = (
+            "Changed-pixel fraction vs the previous kept keyframe (0–1): how much of the "
+            "screen this frame altered. A larger Δ is a bigger, cleaner state change."
+        )
         boxes.append(
             f'<div class="lightbox" id="kf-{rv.name}-{kf.index}"><div class="box">'
             f'<a class="close" href="#" data-lbclose>✕</a>'
             f'<img src="{_img_src(rv.name, kf)}" alt="keyframe {kf.index} enlarged">'
             f'<div class="lbmeta"><h3>Keyframe #{kf.index} · {_fmt_t(kf.t)}–{_fmt_t(kf.t_end)}</h3>'
             f"<p>{verdict}</p>{why}"
-            f'<p class="muted">change Δ {kf.change_score:.3f} vs previous kept frame'
+            f'<p class="muted" title="{delta_title}">change Δ {kf.change_score:.3f} vs previous kept frame'
             f'{" · click detected" if kf.click_detected else ""}</p></div></div></div>'
         )
     lede = (
@@ -356,7 +384,7 @@ def _render_keyframes(rv: RunView) -> str:
         "step it became — audit the call yourself."
     )
     return (
-        '<section class="stage"><h2><span class="n">1</span> Keyframes</h2>'
+        '<section class="stage" id="stage-keyframes"><h2><span class="n">1</span> Keyframes</h2>'
         f'<p class="lede">{lede}</p>'
         f'<div class="film">{"".join(frames)}</div></section>'
         + "".join(boxes)
@@ -378,16 +406,20 @@ def _render_segments(rv: RunView) -> str:
             f'<div class="seg {kind}" style="flex:0 0 {pct:.3f}%" '
             f'title="{_esc(s.reason)}"><span class="lbl">{_fmt_t(s.duration)}</span></div>'
         )
+    # Show the "By" column only when the VLM actually judged something. Offline it is a dead
+    # constant ("heuristic" on every row), so collapse it into the lede instead of a column.
+    show_by = rv.vlm_active
     rows = []
     for s in rv.segments:
         kind = "golden" if s.kind == SegmentKind.GOLDEN else "dross"
+        by_cell = f"<td>{_esc(s.judged_by)}</td>" if show_by else ""
         rows.append(
             "<tr>"
             f'<td>{_fmt_t(s.start_t)}–{_fmt_t(s.end_t)}</td>'
             f'<td><span class="pill {kind}">{_esc(s.kind)}</span></td>'
             f"<td>{_esc(s.reason)}</td>"
             f"<td>{s.confidence:.2f}</td>"
-            f"<td>{_esc(s.judged_by)}</td>"
+            f"{by_cell}"
             "</tr>"
         )
     lede = (
@@ -395,18 +427,34 @@ def _render_segments(rv: RunView) -> str:
         "keeping) or <b>dross</b> (a mis-click reverted, mouse wander, dead time). The "
         "revert-detection heuristic is always on; a VLM refines it when a key is present."
     )
+    if not show_by:
+        lede += " Every row here was judged by the heuristic (no VLM key set)."
     legend = (
         '<div class="legend">'
         '<span><i style="background:var(--golden)"></i>golden — kept</span>'
         '<span><i style="background:var(--dross)"></i>dross — dropped</span></div>'
     )
+    # Each header explains HOW its column is computed (hover for the tooltip).
+    th = (
+        '<th title="Start–end time of this stretch within the recording.">Span</th>'
+        '<th title="golden = a consequential action, kept as a procedure step; '
+        'dross = reverted / idle / mouse-wander, dropped.">Kind</th>'
+        '<th title="Which heuristic made the call: a revert back to an earlier state, '
+        'a too-brief hold, or a durable change kept as consequential.">Reason</th>'
+        '<th title="Per-segment certainty (~0.5–0.95) from the margin of the heuristic\'s '
+        "own decision: a bigger/cleaner change or a cleaner revert scores higher. Below 0.8 a "
+        'VLM second opinion is sought when an API key is present.">Conf.</th>'
+    )
+    if show_by:
+        th += ('<th title="Which judge set this row: the always-on heuristic, or a VLM that '
+               'refined an ambiguous (&lt;0.8) call.">By</th>')
     table = (
         '<table class="segtable"><thead><tr>'
-        "<th>Span</th><th>Kind</th><th>Reason</th><th>Conf.</th><th>By</th>"
+        f"{th}"
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
     return (
-        '<section class="stage"><h2><span class="n">2</span> Golden / dross</h2>'
+        '<section class="stage" id="stage-golden"><h2><span class="n">2</span> Golden / dross</h2>'
         f'<p class="lede">{lede}</p>'
         f'{legend}<div class="timeline">{"".join(bars)}</div>'
         f'<div class="axis"><span>0:00</span><span>{_fmt_t(total)}</span></div>'
@@ -455,8 +503,16 @@ def _render_eval(rv: RunView) -> str:
         )
     if not notes:
         notes.append("No disagreement on this clip.")
+    metric_help = {
+        "precision": (f"Precision = tp / (tp + fp): of the time graded golden, the fraction "
+                      f"ground truth agrees is golden. Computed on a {EVAL_STEP}s grid."),
+        "recall": (f"Recall = tp / (tp + fn): of the true golden time, the fraction the "
+                   f"heuristic recovered. Computed on a {EVAL_STEP}s grid."),
+        "f1": "F1 = harmonic mean of precision and recall — one combined score.",
+    }
     metrics = "".join(
-        f'<div class="stat"><div class="v">{sc.get(k, 0):.2f}</div><div class="l">{lbl}</div></div>'
+        f'<div class="stat" title="{metric_help[k]}"><div class="v">{sc.get(k, 0):.2f}</div>'
+        f'<div class="l">{lbl}</div></div>'
         for k, lbl in (("precision", "Precision"), ("recall", "Recall"), ("f1", "F1"))
     )
     lede = (
@@ -483,7 +539,7 @@ def _render_eval(rv: RunView) -> str:
         "not out-of-sample accuracy.</p>"
     )
     return (
-        '<section class="stage"><h2><span class="n">2·eval</span> Accuracy vs ground truth</h2>'
+        '<section class="stage" id="stage-eval"><h2><span class="n">2·eval</span> Accuracy vs ground truth</h2>'
         f'<p class="lede">{lede}</p>'
         f"{knob_line}{caveat}"
         f'<div class="statgrid" style="margin-bottom:16px">{metrics}</div>'
@@ -525,10 +581,15 @@ def _render_procedure(rv: RunView) -> str:
         desc = f'<div class="intent">{_esc(st.description)}</div>' if st.description else ""
         if st.held_seconds > 0:
             active = max(0.0, st.est_seconds - st.held_seconds)
+            held_title = (
+                "est = the full segment span. 'held' = the part beyond the active-action "
+                "threshold (max active) that the state just sat unchanged; pixels can't tell "
+                "active work from waiting, so it is reported separately, not hidden."
+            )
             est_html = (
                 f"est {_fmt_t(st.est_seconds)} "
-                f'<span class="held">(≤{_fmt_t(active)} active + {_fmt_t(st.held_seconds)} '
-                "held — attribution unknown)</span>"
+                f'<span class="held" title="{held_title}">(≤{_fmt_t(active)} active + '
+                f'{_fmt_t(st.held_seconds)} held — attribution unknown)</span>'
             )
         else:
             est_html = f"est {_fmt_t(st.est_seconds)}"
@@ -552,98 +613,218 @@ def _render_procedure(rv: RunView) -> str:
         "consecutive keyframes into one step is later-phase work, not yet built)."
     )
     return (
-        '<section class="stage"><h2><span class="n">3</span> Procedure '
+        '<section class="stage" id="stage-procedure"><h2><span class="n">3</span> Procedure '
         f'— {_esc(rv.procedure.title)}</h2>'
         f'<p class="lede">{lede}</p>{"".join(steps)}</section>'
     )
 
 
+# Grouped finding presentation: outside-in label + a tooltip explaining the kind. The order
+# here is the order the groups render in.
+_FINDING_GROUPS = [
+    (FindingKind.MISSING_STEP.value, "Missing",
+     "A step the recording shows that your written SOP never mentions."),
+    (FindingKind.OUT_OF_ORDER.value, "Out of order",
+     "A step your SOP documents in a different sequence than the recording."),
+    (FindingKind.EXTRA_IN_DOC.value, "Not in the recording",
+     "A step your SOP describes that the recording never shows happening."),
+    (FindingKind.UNDER_DOCUMENTED.value, "Thinly covered",
+     "A step your SOP mentions, but only sketchily given what the recording shows."),
+]
+
+
 def _render_audit(rv: RunView) -> str:
     if rv.audit is None:
         return ""  # audit is optional; omit the section entirely when absent
-    cov = max(0.0, min(1.0, rv.audit.coverage))
-    if rv.audit.findings:
-        fin = "".join(
+    findings = rv.audit.findings
+    by_kind: dict[str, list] = {}
+    for f in findings:
+        by_kind.setdefault(f.kind, []).append(f)
+
+    groups_html = []
+    for kind, label, tip in _FINDING_GROUPS:
+        items = by_kind.get(kind, [])
+        if not items:
+            continue
+        rows = "".join(
             '<div class="finding">'
-            f'<div class="k">{_esc(f.kind)}'
+            f'<div class="k">{_esc(label)}'
             f'{" · step " + str(f.procedure_step_index + 1) if f.procedure_step_index is not None else ""}'
             f'{" · " + _esc(f.doc_ref) if f.doc_ref else ""}</div>'
             f"{_esc(f.detail)}</div>"
-            for f in rv.audit.findings
+            for f in items
+        )
+        groups_html.append(
+            f'<h3 class="findgroup" title="{tip}">{_esc(label)} '
+            f'<span class="muted">({len(items)})</span></h3>{rows}'
+        )
+    if groups_html:
+        fin = "".join(groups_html)
+    else:
+        fin = '<p class="empty">No gaps found — your written doc covers every step the recording shows.</p>'
+
+    # The recording is the reference; the written doc is what's being graded against it.
+    ref_line = (
+        '<p class="lede"><b>The recording is treated as ground truth</b> — this checks your '
+        "written SOP <em>against</em> it. It grades the doc, not the tool: coverage is the "
+        "fraction of the steps the recording shows that your SOP also covers.</p>"
+    )
+
+    # Plain count, never a grade-colored percentage. covered = generated steps the doc covers.
+    n_missing = len(by_kind.get(FindingKind.MISSING_STEP.value, []))
+    m_steps = len(rv.procedure.steps) if rv.procedure is not None else None
+    if m_steps is not None:
+        covered = max(0, m_steps - n_missing)
+        gap = (
+            f'<p class="auditcount">Your SOP covers <b>{covered} of {m_steps}</b> steps the '
+            "recording shows.</p>"
         )
     else:
-        fin = '<p class="empty">No gaps found — the written doc covers every generated step.</p>'
+        gap = ""
+
     # Honesty: how the audit aligned steps bounds what it can find. Label it by method
-    # (audit.py records AuditReport.method) — never render a count ratio as a content audit.
+    # (audit.py records AuditReport.method) — never present a count ratio as a content audit.
     doc = _esc(rv.audit.written_doc)
     method = rv.audit.method
     if method == "vlm":
-        lede = (
+        method_line = (
             f"<b>VLM content match</b> against <code>{doc}</code>: each generated step matched "
-            "to the doc step describing the same action by meaning — missing, mis-ordered, or "
-            "under-documented (thinly covered)."
+            "to the doc step describing the same action by meaning."
         )
-        cov_label = "of generated steps semantically matched to a doc step."
     elif method == "lexical":
         floor = rv.meta.get("match_floor")
         floor_txt = f" (match floor {floor})" if floor is not None else ""
-        lede = (
+        method_line = (
             f"<b>Offline lexical content match</b> against <code>{doc}</code>{floor_txt} — "
             "<b>no model</b>: each step matched to the doc step with the highest word overlap, "
-            "then order checked. This proves content audit is <em>content-gated, not "
-            "VLM-gated</em> (here the content is manually-filled intents). It is <b>lexical, "
-            "not semantic</b> — it can mis-pair on shared vocabulary; <em>under-documented</em> "
-            "(a thinness judgement) is deliberately left to the VLM."
+            "then order checked. It is <b>lexical, not semantic</b> — it can mis-pair on shared "
+            "vocabulary; <em>thinly covered</em> (a thinness judgement) is left to the VLM."
         )
-        cov_label = "of generated steps lexically matched to a doc step."
     else:  # count
         placeholder_titles = bool(
             rv.procedure and any("[fill in" in s.title for s in rv.procedure.steps)
         )
-        lede = (
+        method_line = (
             f"<b>Structural check only</b> (no content): generated steps aligned to "
-            f"<code>{doc}</code> <b>by position and count</b>. Mis-order / under-documented "
+            f"<code>{doc}</code> <b>by position and count</b>. Out-of-order / thinly-covered "
             "detection is <b>content-dependent</b> — it needs step titles/intents (from the "
-            "VLM <em>or</em> a manual fill-in, not VLM-only); with placeholder titles there is "
-            "nothing to match here yet."
-        )
-        cov_label = (
-            "structural (count) alignment — <b>not</b> a content match."
+            "VLM <em>or</em> a manual fill-in)."
             + (
-                " Generated titles are still <span class='todo'>[fill in]</span> placeholders, "
-                "so there is no content to match by construction."
+                " Generated titles are still <span class='todo'>[fill in]</span> placeholders "
+                "here, so there is nothing to match by content yet."
                 if placeholder_titles
                 else ""
             )
         )
+    method_html = (
+        f'<p style="margin:8px 0 0;font-size:12px;color:var(--muted)">{method_line}</p>'
+    )
     return (
-        '<section class="stage"><h2><span class="n">4</span> Audit vs written doc</h2>'
-        f'<p class="lede">{lede}</p>'
-        f'<div class="cov"><span style="width:{cov*100:.1f}%"></span></div>'
-        f'<p style="margin:6px 0 0;font-size:13px;color:var(--muted)">'
-        f"{cov*100:.0f}% {cov_label}</p>"
-        f"{fin}</section>"
+        '<section class="stage" id="stage-audit"><h2><span class="n">4</span> '
+        "Does your written doc match the recording?</h2>"
+        f"{ref_line}{gap}{fin}{method_html}</section>"
     )
 
 
-def _render_how() -> str:
-    """Plain-language 'how it works' — the pipeline as a user reads it, collapsed by default."""
-    steps = [
-        ("Decompose", "splits your recording into the handful of frames where the screen "
-         "actually changed (ignoring mouse jiggle and re-renders)."),
-        ("Keep or drop", "judges each stretch golden (a real action) or dross (a mis-click you "
-         "undid, idle time, dead air) — so fumbles don't end up in your SOP."),
-        ("Write timed steps", "turns each kept stretch into one ordered, time-estimated step. "
-         "Wording is yours to fill in, or a vision model drafts it when you add a key."),
-        ("Audit (optional)", "compares the result against an SOP you already have, flagging "
-         "steps it's missing, out of order, or covers only thinly."),
+def _knob_html(rv: RunView, items: list[tuple[str, str]]) -> str:
+    """Render 'name = current-value' chips for the named meta keys, reading live values from
+    meta.json. A key absent from meta (e.g. the stage hasn't run) shows '—'."""
+    chips = []
+    for key, human in items:
+        if key in rv.meta:
+            val = rv.meta[key]
+            chips.append(f'<code title="{_esc(human)}">{_esc(key)} = {_esc(val)}</code>')
+        else:
+            chips.append(f'<code title="{_esc(human)} (not recorded for this run)">{_esc(key)} = —</code>')
+    return " · ".join(chips)
+
+
+def _worked_trace(rv: RunView) -> str:
+    """A concrete trace through THIS run's real artifacts — no hardcoded numbers."""
+    parts = [f"{_fmt_t(rv.duration)} recording"]
+    fps = rv.meta.get("fps_sampled")
+    if fps is not None:
+        parts.append(f"sampled at {fps} fps")
+    parts.append(f"{len(rv.keyframes)} keyframes")
+    if rv.segments is not None:
+        n_drop = sum(1 for s in rv.segments if s.kind == SegmentKind.DROSS)
+        drop_txt = f" ({n_drop} dropped: reverted/idle detour)" if n_drop else " (none dropped)"
+        parts.append(f"{len(rv.segments)} segments{drop_txt}")
+    if rv.procedure is not None:
+        parts.append(
+            f"{len(rv.procedure.steps)} steps ({_fmt_t(rv.procedure.total_est_seconds)})"
+        )
+    return ", ".join(parts)
+
+
+def _render_how(rv: RunView) -> str:
+    """Plain-language 'how it works' — each stage's I/O, mechanism, live knobs, and one honest
+    limit, anchored to the live section so the explanation connects to seeing it work."""
+    stages = [
+        {
+            "n": 1, "anchor": "stage-keyframes", "title": "Decompose",
+            "io": "recording (video) → keyframes",
+            "mech": "ffmpeg samples frames at a fixed rate; each is diffed against the current "
+                    "stable frame by perceptual-hash / SSIM, and a new keyframe opens only when "
+                    "the change clears a threshold AND the new state is held past a dwell.",
+            "knobs": [("change_threshold", "minimum changed-pixel fraction to count as a new state"),
+                      ("min_dwell_s", "minimum seconds a state must hold to survive as a keyframe")],
+            "limit": "It keys on visual change, so a change too subtle to clear the threshold — "
+                     "or one that never settles — is missed.",
+        },
+        {
+            "n": 2, "anchor": "stage-golden", "title": "Keep or drop",
+            "io": "keyframes → golden / dross segments",
+            "mech": "revert-detection — a later keyframe returning to an earlier state marks the "
+                    "excursion between them as an abandoned detour (dross) — plus the dwell "
+                    "check; everything else is kept as golden. Confidence comes from each "
+                    "call's own margin.",
+            "knobs": [("min_dwell_s", "a state held briefer than this is treated as a transient")],
+            "limit": "Only dross that REVERTS is caught; non-reverting dross — idle time, "
+                     "mouse-wander that doesn't return — leaks through (visible in the accuracy panel).",
+        },
+        {
+            "n": 3, "anchor": "stage-procedure", "title": "Write timed steps",
+            "io": "golden segments → ordered, time-estimated procedure",
+            "mech": "one step per kept keyframe, in time order; each step's estimate is its "
+                    "segment span, with any hold beyond the active-action threshold split out "
+                    "as 'held' rather than counted as work.",
+            "knobs": [("max_active_s", "span beyond this is reported as held (attribution unknown), not active")],
+            "limit": "Pixels can't separate active work from waiting, and offline the step "
+                     "titles are placeholders you fill in (or a VLM drafts).",
+        },
+        {
+            "n": 4, "anchor": "stage-audit", "title": "Audit (optional)",
+            "io": "procedure + your written doc → gap findings",
+            "mech": "each generated step is matched to a doc step — offline by word overlap "
+                    "(lexical) or, with a key, by meaning (VLM) — then order and coverage are "
+                    "checked. The recording is the reference; the doc is graded against it.",
+            "knobs": [("match_floor", "minimum word-overlap for a lexical step match to count")],
+            "limit": "Offline the match is lexical, not semantic — it can mis-pair on shared "
+                     "vocabulary, and 'thinly covered' needs the VLM.",
+        },
     ]
-    lis = "".join(f"<li><b>{t}</b> — {d}</li>" for t, d in steps)
+    cards = []
+    for s in stages:
+        knobs = _knob_html(rv, s["knobs"])
+        cards.append(
+            '<div class="howstage">'
+            f'<h3><span class="n">{s["n"]}</span> {s["title"]} '
+            f'<a class="howlink" href="#{s["anchor"]}">see it live ↓</a></h3>'
+            f'<p class="howio"><b>{s["io"]}</b></p>'
+            f'<p>{s["mech"]}</p>'
+            f'<p class="howknob">Knob(s): {knobs}</p>'
+            f'<p class="howlimit"><b>Limit:</b> {s["limit"]}</p>'
+            "</div>"
+        )
+    trace = _worked_trace(rv)
     return (
         '<details class="disc"><summary>How it works</summary>'
         '<p class="lede">Four stages, all running offline by default; a vision-model key only '
-        "enriches wording and the audit.</p>"
-        f"<ol class='how'>{lis}</ol></details>"
+        "enriches step wording and the audit. Knob values below are read live from this run's "
+        "<code>meta.json</code>.</p>"
+        f'<p class="howtrace"><b>This run, end to end:</b> {_esc(trace)}.</p>'
+        f'{"".join(cards)}</details>'
     )
 
 
@@ -845,7 +1026,7 @@ def render_page(runs: list[Path], active: Path | None) -> str:
             + _render_eval(rv)
             + _render_procedure(rv)
             + _render_audit(rv)
-            + _render_how()
+            + _render_how(rv)
             + _render_faq(rv)
         )
     return f"""<!doctype html>
