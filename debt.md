@@ -14,3 +14,8 @@ edited and append anything deferred here, with enough locus to act on it cold.
 - [ ] procap/extract.py:sample_frames — re-decodes the whole video to PNGs on disk; fine for
   short clips, wasteful for long recordings (defer streaming/selective decode until a real
   long-video case exists).
+- [ ] procap/golden.py:classify — over-segments real screencasts: one golden segment per durable
+  *visual* change with no semantic grouping, so pan/zoom/panel-toggle each become a "step" (29
+  golden steps for a 3-min KiCad clip, see docs/decisions/2026-06-26-real-corpus-findings.md).
+  This is the VLM-refinement's job (merge/relabel inconsequential changes) — NOT a threshold fix;
+  raising change_threshold drops genuine actions too. Defer to the golden/VLM workstream.
