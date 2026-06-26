@@ -45,7 +45,8 @@ def cmd_procedure(args) -> int:
     run = _resolve_run(args.run)
     meta = run.read_meta()
     segs = run.read_segments()
-    proc = procedure_stage.synthesize(segs, source_video=meta["source_video"])
+    proc = procedure_stage.synthesize(segs, source_video=meta["source_video"],
+                                      keyframes=run.read_keyframes())
     run.write_procedure(proc)
     (run.dir / "procedure.md").write_text(procedure_stage.render_markdown(proc))
     print(f"synthesized {len(proc.steps)} steps (~{proc.total_est_seconds:.0f}s) "
@@ -70,7 +71,7 @@ def cmd_run(args) -> int:
     kfs = run.read_keyframes()
     segs = golden_stage.refine_with_vlm(golden_stage.classify(kfs), kfs)
     run.write_segments(segs)
-    proc = procedure_stage.synthesize(segs, source_video=str(args.video))
+    proc = procedure_stage.synthesize(segs, source_video=str(args.video), keyframes=kfs)
     run.write_procedure(proc)
     (run.dir / "procedure.md").write_text(procedure_stage.render_markdown(proc))
     print(f"[run] {len(kfs)} keyframes, {sum(1 for s in segs if s.kind=='golden')} golden "
