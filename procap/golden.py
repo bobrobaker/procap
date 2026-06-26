@@ -17,7 +17,23 @@ from __future__ import annotations
 
 from .imageutil import changed_fraction_paths
 from .model import Keyframe, Segment, SegmentKind
-from .vlm import VLM
+from .vlm import VLM, extract_json
+
+# Heuristic segments carry confidence 0.7; below this they are "ambiguous" and worth a
+# VLM second opinion. A VLM verdict is only allowed to overwrite the heuristic prior when
+# the model is at least this sure, so a hedged reply leaves the baseline untouched.
+_AMBIGUOUS_BELOW = 0.8
+_VLM_MIN_CONFIDENCE = 0.6
+
+_REFINE_PROMPT = (
+    "These are consecutive keyframes from a screen recording of someone operating a "
+    "technical GUI, in time order. Decide whether this stretch is a CONSEQUENTIAL action "
+    "(a real, kept change to the system — keep it) or an ABANDONED/INCONSEQUENTIAL one "
+    "(a mis-click that was reverted, mouse wander, idle dwell — drop it).\n"
+    'Reply with ONLY a JSON object: {"kind": "golden" | "dross", '
+    '"confidence": <0..1>, "reason": "<short phrase>"}. '
+    "Use \"golden\" for consequential, \"dross\" for abandoned/inconsequential."
+)
 
 
 def _same_state(a: Keyframe, b: Keyframe, revert_frac: float) -> bool:
@@ -94,7 +110,33 @@ def refine_with_vlm(segments: list[Segment], keyframes: list[Keyframe],
     vlm = vlm or VLM()
     if not vlm.available:
         return segments
-    # TODO(stage-2 agent): show the model each low-confidence segment's keyframes and ask
-    # "is this a consequential action or an abandoned/inconsequential one?"; update kind/
-    # confidence/judged_by from the reply. Keep the heuristic result as the prior.
+
+    by_index = {kf.index: kf for kf in keyframes}
+    for seg in segments:
+        if seg.confidence >= _AMBIGUOUS_BELOW:
+            continue  # heuristic is already confident; don't spend a VLM call
+        paths = [by_index[i].path for i in seg.keyframe_indexes if i in by_index]
+        if not paths:
+            continue  # nothing to show the model; keep the prior
+
+        try:
+            reply = vlm.ask(_REFINE_PROMPT, image_paths=paths)
+            data = extract_json(reply)
+            kind = str(data["kind"]).strip().lower()
+            conf = float(data.get("confidence", 0.0))
+        except Exception:
+            continue  # parse/IO error -> keep the heuristic prior, never crash the stage
+
+        if kind not in (SegmentKind.GOLDEN.value, SegmentKind.DROSS.value):
+            continue
+        if conf < _VLM_MIN_CONFIDENCE:
+            continue  # hedged verdict: leave the heuristic prior in place
+
+        # Confident verdict: adopt it (this is the only path that flips a label).
+        seg.kind = kind
+        seg.confidence = conf
+        seg.judged_by = "vlm"
+        reason = data.get("reason")
+        if reason:
+            seg.reason = str(reason)
     return segments

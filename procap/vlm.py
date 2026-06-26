@@ -11,7 +11,9 @@ raises — so a stage that forgets to branch fails loud rather than silently deg
 from __future__ import annotations
 
 import base64
+import json
 import os
+import re
 from pathlib import Path
 
 # Latest capable vision model as of this writing; override via VLM(model=...).
@@ -76,6 +78,29 @@ class VLM:
             messages=[{"role": "user", "content": content}],
         )
         return "".join(block.text for block in resp.content if block.type == "text")
+
+
+_JSON_OBJ = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def extract_json(text: str) -> dict:
+    """Pull the first JSON object out of a model reply, tolerating prose around it.
+
+    VLM stages ask the model for a small JSON object but models routinely wrap it in
+    explanation or markdown fences. We grab the outermost ``{...}`` span and parse it.
+    Raises ValueError when no parseable object is present so callers can fall back to
+    their heuristic/placeholder rather than crash the pipeline.
+    """
+    m = _JSON_OBJ.search(text or "")
+    if not m:
+        raise ValueError(f"no JSON object in VLM reply: {text!r}")
+    try:
+        obj = json.loads(m.group(0))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"unparseable JSON in VLM reply: {text!r}") from e
+    if not isinstance(obj, dict):
+        raise ValueError(f"VLM reply JSON is not an object: {text!r}")
+    return obj
 
 
 _default: VLM | None = None
