@@ -79,6 +79,10 @@ class ProcedureStep:
     end_t: float
     est_seconds: float
     intent: str = ""          # manual fill-in: "what you are doing here" (the spec's prompt)
+    held_seconds: float = 0.0  # of est_seconds, the portion that is held/idle dwell whose
+                               # attribution (active work vs. waiting) is unknown without
+                               # semantics. est_seconds is still the full span; this just
+                               # decomposes it honestly. active ≈ est_seconds - held_seconds.
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -136,16 +140,28 @@ class AuditFinding:
         return cls(**d)
 
 
+class AuditMethod(str, Enum):
+    """How the audit aligned generated steps to the written doc — which bounds what it
+    can find. `count` is the positional/count baseline (placeholder titles, no content);
+    `lexical` is offline word-overlap content matching (real missing/out-of-order, no model);
+    `vlm` is semantic matching (adds under-documented). Drives honest labelling in the demo."""
+    COUNT = "count"
+    LEXICAL = "lexical"
+    VLM = "vlm"
+
+
 @dataclass
 class AuditReport:
     written_doc: str
     coverage: float                    # fraction of generated steps the doc covers (0..1)
     findings: list[AuditFinding] = field(default_factory=list)
+    method: str = AuditMethod.COUNT.value   # an AuditMethod value — how alignment was done
 
     def to_dict(self) -> dict:
         return {
             "written_doc": self.written_doc,
             "coverage": self.coverage,
+            "method": self.method,
             "findings": [f.to_dict() for f in self.findings],
         }
 
@@ -154,5 +170,6 @@ class AuditReport:
         return cls(
             written_doc=d["written_doc"],
             coverage=d.get("coverage", 0.0),
+            method=d.get("method", AuditMethod.COUNT.value),
             findings=[AuditFinding.from_dict(f) for f in d.get("findings", [])],
         )

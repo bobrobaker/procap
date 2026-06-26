@@ -49,6 +49,7 @@ def cmd_procedure(args) -> int:
                                       keyframes=run.read_keyframes())
     run.write_procedure(proc)
     (run.dir / "procedure.md").write_text(procedure_stage.render_markdown(proc))
+    run.write_meta(**{**meta, "max_active_s": procedure_stage.DEFAULT_MAX_ACTIVE_S})
     print(f"synthesized {len(proc.steps)} steps (~{proc.total_est_seconds:.0f}s) "
           f"-> {run.dir}/procedure.md")
     return 0
@@ -60,8 +61,9 @@ def cmd_audit(args) -> int:
     report = audit_stage.audit(proc, args.against)
     run.write_audit(report)
     (run.dir / "audit.md").write_text(audit_stage.render_markdown(report))
-    print(f"audit: {report.coverage * 100:.0f}% coverage, {len(report.findings)} finding(s) "
-          f"-> {run.dir}/audit.md")
+    run.write_meta(**{**run.read_meta(), "match_floor": audit_stage.DEFAULT_MATCH_FLOOR})
+    print(f"audit [{report.method}]: {report.coverage * 100:.0f}% coverage, "
+          f"{len(report.findings)} finding(s) -> {run.dir}/audit.md")
     return 0
 
 
@@ -74,14 +76,22 @@ def cmd_run(args) -> int:
     proc = procedure_stage.synthesize(segs, source_video=str(args.video), keyframes=kfs)
     run.write_procedure(proc)
     (run.dir / "procedure.md").write_text(procedure_stage.render_markdown(proc))
+    run.write_meta(**{**run.read_meta(), "max_active_s": procedure_stage.DEFAULT_MAX_ACTIVE_S})
     print(f"[run] {len(kfs)} keyframes, {sum(1 for s in segs if s.kind=='golden')} golden "
           f"segments, {len(proc.steps)} steps -> {run.dir}")
     if args.against:
         report = audit_stage.audit(proc, args.against)
         run.write_audit(report)
         (run.dir / "audit.md").write_text(audit_stage.render_markdown(report))
-        print(f"[run] audit: {report.coverage * 100:.0f}% coverage, "
+        run.write_meta(**{**run.read_meta(), "match_floor": audit_stage.DEFAULT_MATCH_FLOOR})
+        print(f"[run] audit [{report.method}]: {report.coverage * 100:.0f}% coverage, "
               f"{len(report.findings)} finding(s)")
+    return 0
+
+
+def cmd_serve(args) -> int:
+    from . import webdemo
+    webdemo.serve(args.runs, args.host, args.port)
     return 0
 
 
@@ -113,6 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--fps", type=float, default=2.0)
     pr.add_argument("--against", default=None, help="optional written doc to audit against")
     pr.set_defaults(func=cmd_run)
+
+    ps = sub.add_parser("serve", help="local web demo of run artifacts")
+    ps.add_argument("--runs", default="runs", help="base dir holding run dirs (default runs/)")
+    ps.add_argument("--host", default="127.0.0.1")
+    ps.add_argument("--port", type=int, default=8000)
+    ps.set_defaults(func=cmd_serve)
     return p
 
 

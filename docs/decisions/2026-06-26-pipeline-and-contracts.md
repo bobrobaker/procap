@@ -29,8 +29,16 @@ is false and stages take the heuristic path.
   is fragile for the lab/operations setting it targets. Heuristics give a deterministic,
   unit-testable spine; the VLM is upside, not a single point of failure.
 - **Golden detection has a genuine non-VLM core**: a mis-click-and-return shows up as a
-  perceptual-hash *return* to a prior state, and mouse-wander as change confined to the cursor
-  with no UI delta. These are measurable without semantics, so the baseline is real, not a stub.
+  perceptual-hash *return* to a prior state. That much is implemented and measurable without
+  semantics, so the baseline is real, not a stub.
+  - **Correction (2026-06-26, confer w/ brain2):** an earlier version of this line also
+    claimed the baseline detects "mouse-wander as change confined to the cursor with no UI
+    delta." That capability is **not implemented** — `golden.classify` does only
+    revert-detection + a min-dwell flicker filter; there is no cursor/UI-delta or idle-dross
+    signal. The eval overlay on `labeled_demo` proves the miss (the 4–7s wander is scored as a
+    false-positive golden, contaminating step 2's time estimate). Non-reverting dross (idle,
+    dead time, slow wander) is a structural blind spot of revert-detection. Treat
+    idle/no-UI-delta dross as **planned**, not delivered (see `road.md` Phase 2 follow-up).
 
 ## Consequences
 

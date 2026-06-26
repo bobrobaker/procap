@@ -47,14 +47,19 @@ segments with a reason per segment.
 **Design:** heuristic baseline — (a) **revert-detection**: if the state at keyframe *j*
 returns (low changed-pixel fraction, `imageutil.changed_fraction_paths`) to an earlier
 state at *i<j*, the excursion *i+1..j* is dross; (b) **dwell**: states held < `min_dwell_s`
-are transient/dross;
-(c) **wander**: change confined to cursor region with no UI delta is dross. The VLM, when
-keyed, re-judges ambiguous segments. Heuristic must stand alone.
+are transient/dross. The VLM, when keyed, re-judges ambiguous segments. Heuristic must stand alone.
+- **(c) idle / wander dross — PLANNED, not yet implemented** (Phase 2 follow-up): change
+  confined to the cursor with no UI delta, and long *non-reverting* idle holds, are a
+  structural blind spot of revert-detection. The `labeled_demo` eval overlay shows the cost
+  (the 4–7s wander scores as a false-positive golden, F1 0.84 not 1.0). Until built,
+  idle/dead-time dross is undetected (corrected 2026-06-26 via confer w/ brain2).
 
 **Validation:** `pytest tests/test_golden.py` against the synthetic clip's ground-truth
-labels (it contains a scripted wrong-click-and-revert excursion + a mouse-wander stretch).
+labels (it contains a scripted wrong-click-and-revert excursion + a mouse-wander stretch —
+the wander is currently a known miss, see (c)).
 
 **Exit:** on the synthetic clip, golden/dross labels match ground truth with ≥ 0.8 F1.
+(Met: F1 0.84, recall 1.0, precision 0.72 — the precision gap is the undetected wander.)
 
 ---
 
@@ -65,8 +70,13 @@ and semantic audit wired, offline-tested only — live validation tracked in Pha
 
 **Deliverable:** `procap procedure RUN` emits a time-estimated, ordered procedure (one step
 per golden segment, timestamps → duration estimates, manual `intent` fill-in slots), and
-`procap audit RUN --against DOC.md` compares it to a written procedure, flagging missing /
-out-of-order / under-documented steps.
+`procap audit RUN --against DOC.md` compares it to a written procedure. **With placeholder
+titles the audit is a structural step-count alignment** (flags missing / extra by
+position+count only). **Out-of-order / under-documented detection is content-dependent, not
+VLM-only**: it keys on step titles/intents, which can come from the VLM *or* a manual
+`intent` fill-in — so an offline text-match audit on filled intents is reachable without a
+model (not yet built). It's content-gated, not VLM-gated (clarified 2026-06-26 via confer
+w/ brain2; corrected from an earlier "requires the VLM" overclaim).
 
 **Surfaces:** `procap/procedure.py`, `procap/audit.py`,
 `procap/model.py:Procedure,ProcedureStep,AuditReport,AuditFinding`.
@@ -113,3 +123,24 @@ re-measure golden step count on the real KiCad clip before/after de-segmentation
 
 **Exit:** with a key, `procap run` produces real step titles/descriptions and a semantic audit;
 the KiCad clip's procedure collapses from ~29 steps to a count matching its logical actions.
+
+---
+
+### Deferred follow-ups (from 2026-06-26 confer w/ brain2 — recorded, not scheduled)
+
+Surfaced while hardening the demo + honesty pass (see
+`docs/decisions/2026-06-26-demo-and-honesty-pass.md`). Captured here so they aren't relitigated:
+
+- **Idle / no-UI-delta dross signal (Phase 2).** Revert-detection is structurally blind to
+  *non-reverting* dross (idle, dead time, slow wander); on `labeled_demo` the 4–7s wander
+  scores as a false-positive golden (precision 0.72). The `procedure` stage now *accounts* for
+  it honestly (held-time decomposition) rather than mislabelling — a real classify-layer
+  signal is deferred. Note: extract.py *fuses* idle into the preceding keyframe's dwell window,
+  so this likely belongs at the extract/de-segmentation layer (Phase 4), not `golden.classify`.
+- **Out-of-sample F1 (Phase 2).** Accuracy is measured on the *one* labeled clip — in-sample.
+  The fix is a **second labeled synthetic clip** to report held-out F1; the demo currently
+  states the in-sample caveat explicitly.
+- **Offline `under_documented` audit.** Left VLM-only — sentence length is a junk proxy for
+  thinness. The offline lexical audit ships missing / extra / out-of-order only.
+- **Nice-to-have demo:** multi-run comparison view; offline diff-region hint (where on screen
+  changed); a `max_active_s` / `match_floor` mini-sweep readout.

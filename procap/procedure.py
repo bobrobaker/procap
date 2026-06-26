@@ -17,6 +17,14 @@ from .vlm import VLM, extract_json
 
 _FILL = "[fill in: what are you doing in this step?]"
 
+# A golden stretch longer than this is reported as "≤ this active + (rest) held". The
+# rest is dwell whose attribution — active work vs. waiting/idle — cannot be told from
+# pixels without semantics, so we flag it rather than assert it as action time. This is a
+# tuned heuristic knob, NOT ground truth: the demo surfaces it as such, and the value is
+# recorded in meta.json. Decomposition only — it never drops a step (recall-safe) and
+# never changes est_seconds, the full span.
+DEFAULT_MAX_ACTIVE_S = 3.0
+
 _DESCRIBE_PROMPT = (
     "These are consecutive keyframes from a screen recording, in time order, showing one "
     "step of someone operating a technical GUI. Describe the action performed in this step.\n"
@@ -31,6 +39,7 @@ def synthesize(
     title: str | None = None,
     vlm: VLM | None = None,
     keyframes: list[Keyframe] | None = None,
+    max_active_s: float = DEFAULT_MAX_ACTIVE_S,
 ) -> Procedure:
     """Golden segments -> Procedure. Dross segments are skipped.
 
@@ -45,6 +54,7 @@ def synthesize(
     steps: list[ProcedureStep] = []
     for i, seg in enumerate(golden):
         step_title, desc = _describe(seg, i, vlm, by_index)
+        held = round(max(0.0, seg.duration - max_active_s), 1)
         steps.append(ProcedureStep(
             index=i,
             title=step_title,
@@ -54,6 +64,7 @@ def synthesize(
             end_t=seg.end_t,
             est_seconds=round(seg.duration, 1),
             intent="",
+            held_seconds=held,
         ))
 
     total = round(sum(s.est_seconds for s in steps), 1)
@@ -102,7 +113,15 @@ def render_markdown(procedure: Procedure) -> str:
     ]
     for s in procedure.steps:
         lines.append(f"## {s.index + 1}. {s.title}")
-        lines.append(f"_{s.start_t:.1f}s–{s.end_t:.1f}s · est {s.est_seconds:.0f}s_")
+        if s.held_seconds > 0:
+            active = max(0.0, s.est_seconds - s.held_seconds)
+            est_line = (
+                f"_{s.start_t:.1f}s–{s.end_t:.1f}s · est {s.est_seconds:.0f}s "
+                f"(≤{active:.0f}s active + {s.held_seconds:.0f}s held — attribution unknown)_"
+            )
+        else:
+            est_line = f"_{s.start_t:.1f}s–{s.end_t:.1f}s · est {s.est_seconds:.0f}s_"
+        lines.append(est_line)
         if s.description:
             lines.append("")
             lines.append(s.description)
