@@ -1,6 +1,6 @@
-# procap
+# ProCap
 
-procap turns a screenshare recording of a technical GUI (operating a machine, a lab
+ProCap turns a screenshare recording of a technical GUI (operating a machine, a lab
 instrument, a control panel) into a written procedure. It decomposes the video into
 keyframes at moments of meaningful change, classifies stretches as **golden**
 (consequential actions worth keeping) or **dross** (mis-clicks reverted, mouse
@@ -8,6 +8,19 @@ wander, dead time), then synthesizes an ordered, time-estimated procedure from t
 golden stretches — and can audit that procedure against an existing written doc to
 flag gaps. Heuristics are the always-on baseline; a vision LLM enriches the output
 when an `ANTHROPIC_API_KEY` is present (`procap.vlm`), never as a hard dependency.
+
+## Naming & user-facing conventions
+
+- **Product name is `ProCap`** (capital P, capital C) everywhere user-facing — prose,
+  docs, demo masthead/copy. The **package, module, and CLI stay lowercase `procap`**
+  (`import procap`, `procap run`, `procap/…`) — code identifiers do not change.
+- **Define golden / dross (and any domain term) up top** wherever a newcomer first meets
+  the product (demo, README) — never assume the reader knows them.
+- **GUI/demo copy is objective, not self-referential.** Present what the tool found and
+  let the artifact speak. Do **not** narrate the design principle at the reader
+  ("don't take the pitch on faith…", "here's a real run so you can judge…", "inspect the
+  example") — honesty/seam-exposure is the *principle behind* what we build, it stays
+  hidden in the copy. Show the data plainly; cut the meta-commentary.
 
 ## Map
 
