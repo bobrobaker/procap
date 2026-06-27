@@ -61,20 +61,29 @@ def base_window(active_tab: str) -> Image.Image:
     return img
 
 
-def draw_main(pump: bool, valve: bool, flow: int) -> Image.Image:
+def draw_main(pump: bool = False, valve: bool = False, flow: int = 0,
+              heater: bool = False, temp: int = 0, logging: bool = False) -> Image.Image:
     img = base_window("Main")
     d = ImageDraw.Draw(img)
     d.text((44, 116), "Main Control", font=F_TITLE, fill=TEXT)
 
     # Prominent status banner: a real control GUI announces the current operation boldly.
     # Each consequential action repaints this whole bar, which is the unambiguous visible
-    # delta the keyframer keys on (and which mouse-wander never produces).
-    if flow > 0:
-        banner, bcol = f"FLOW {flow} mL/min - STEADY", (40, 150, 85)
+    # delta the keyframer keys on (and which mouse-wander never produces). The banner shows
+    # the most-recently-engaged subsystem (priority cascade), so every golden step flips it.
+    GREEN = (40, 150, 85)
+    if logging:
+        banner, bcol = "RUN LOGGING - RECORDING", GREEN
+    elif temp > 0:
+        banner, bcol = f"TEMP {temp}°C - HOLDING", GREEN
+    elif heater:
+        banner, bcol = "HEATER ON - WARMING", GREEN
+    elif flow > 0:
+        banner, bcol = f"FLOW {flow} mL/min - STEADY", GREEN
     elif valve:
-        banner, bcol = "VALVE OPEN", (40, 150, 85)
+        banner, bcol = "VALVE OPEN", GREEN
     elif pump:
-        banner, bcol = "PUMP RUNNING", (40, 150, 85)
+        banner, bcol = "PUMP RUNNING", GREEN
     else:
         banner, bcol = "SYSTEM IDLE", (120, 124, 130)
     d.rectangle([44, 150, W - 44, 196], fill=bcol)
@@ -84,9 +93,12 @@ def draw_main(pump: bool, valve: bool, flow: int) -> Image.Image:
         ("Pump", "ON" if pump else "OFF", pump),
         ("Valve", "OPEN" if valve else "CLOSED", valve),
         ("Flow setpoint", f"{flow} mL/min", flow > 0),
+        ("Heater", "ON" if heater else "OFF", heater),
+        ("Temp setpoint", f"{temp}°C", temp > 0),
+        ("Data logging", "ON" if logging else "OFF", logging),
     ]
     for i, (label, val, good) in enumerate(rows):
-        y = 214 + i * 58
+        y = 212 + i * 44
         d.text((44, y), label, font=F_BODY, fill=TEXT)
         col = OK if good else (150, 60, 60)
         light = OK if good else (200, 70, 70)
@@ -94,10 +106,10 @@ def draw_main(pump: bool, valve: bool, flow: int) -> Image.Image:
         box_bg = (228, 245, 234) if good else (248, 232, 232)
         d.rectangle([330, y - 4, 540, y + 32], fill=box_bg, outline=(210, 214, 218))
         d.text((342, y), val, font=F_BODY, fill=col)
-    d.rectangle([44, 420, 220, 470], fill=ACCENT)
-    d.text((70, 432), "Start Pump", font=F_BODY, fill=(255, 255, 255))
-    d.rectangle([240, 420, 416, 470], fill=ACCENT)
-    d.text((266, 432), "Open Valve", font=F_BODY, fill=(255, 255, 255))
+    d.rectangle([44, 486, 220, 536], fill=ACCENT)
+    d.text((70, 498), "Start Pump", font=F_BODY, fill=(255, 255, 255))
+    d.rectangle([240, 486, 416, 536], fill=ACCENT)
+    d.text((266, 498), "Open Valve", font=F_BODY, fill=(255, 255, 255))
     return img
 
 
@@ -122,10 +134,13 @@ def cursor(img: Image.Image, x: int, y: int) -> Image.Image:
 # Screenplay: (duration_s, frame_state_factory, cursor_fn, kind, note).
 # cursor_fn(progress 0..1) -> (x, y). kind is the ground-truth label for the stretch.
 def screenplay():
-    main0 = lambda: draw_main(False, False, 0)
-    main_pump = lambda: draw_main(True, False, 0)
-    main_valve = lambda: draw_main(True, True, 0)
-    main_flow = lambda: draw_main(True, True, 50)
+    main0 = lambda: draw_main()
+    main_pump = lambda: draw_main(pump=True)
+    main_valve = lambda: draw_main(pump=True, valve=True)
+    main_flow = lambda: draw_main(pump=True, valve=True, flow=50)
+    main_heat = lambda: draw_main(pump=True, valve=True, flow=50, heater=True)
+    main_temp = lambda: draw_main(pump=True, valve=True, flow=50, heater=True, temp=65)
+    main_log = lambda: draw_main(pump=True, valve=True, flow=50, heater=True, temp=65, logging=True)
     settings = draw_settings
 
     still = lambda x, y: (lambda p: (x, y))
@@ -135,14 +150,20 @@ def screenplay():
         return (int(cx + 120 * math.cos(p * 6 * math.pi)),
                 int(cy + 90 * math.sin(p * 6 * math.pi)))
 
+    # 7 golden (consequential, each repaints the banner) interleaved with 3 dross. The
+    # settings excursion + revert + wander form one dross stretch around t=6-13 so the
+    # classifier has noise to reject (and a clean backtrack to detect).
     return [
-        (2.0, main0,      still(140, 200), "golden", "initial state: all off"),
-        (2.0, main_pump,  still(130, 440), "golden", "Start Pump -> Pump ON"),
-        (3.0, main_pump,  wander,          "dross",  "mouse wander, no UI change"),
+        (2.0, main0,      still(140, 200), "golden", "initial state: all subsystems idle"),
+        (2.0, main_pump,  still(130, 506), "golden", "Start Pump -> PUMP RUNNING"),
+        (2.0, main_valve, still(330, 506), "golden", "Open Valve -> VALVE OPEN"),
         (2.0, settings,   still(160, 70),  "dross",  "wrong tab: Settings (excursion start)"),
-        (2.0, main_pump,  still(40, 70),   "dross",  "back to Main, same state (revert)"),
-        (2.0, main_valve, still(330, 440), "golden", "Open Valve -> Valve OPEN"),
-        (2.0, main_flow,  still(420, 250), "golden", "set Flow setpoint 50 mL/min"),
+        (2.0, main_valve, still(40, 70),   "dross",  "back to Main, same state (revert)"),
+        (3.0, main_valve, wander,          "dross",  "mouse wander, no UI change"),
+        (2.0, main_flow,  still(420, 250), "golden", "Set Flow setpoint 50 mL/min"),
+        (2.0, main_heat,  still(420, 350), "golden", "Enable Heater -> HEATER ON"),
+        (5.0, main_temp,  still(420, 386), "golden", "Set Temp setpoint 65 C (hold to stabilize)"),
+        (2.0, main_log,   still(420, 432), "golden", "Engage Data logging -> RUN LOGGING"),
     ]
 
 

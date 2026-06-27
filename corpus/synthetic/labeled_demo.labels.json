@@ -3,42 +3,60 @@
     "start": 0.0,
     "end": 2.0,
     "kind": "golden",
-    "note": "initial state: all off"
+    "note": "initial state: all subsystems idle"
   },
   {
     "start": 2.0,
     "end": 4.0,
     "kind": "golden",
-    "note": "Start Pump -> Pump ON"
+    "note": "Start Pump -> PUMP RUNNING"
   },
   {
     "start": 4.0,
-    "end": 7.0,
-    "kind": "dross",
-    "note": "mouse wander, no UI change"
+    "end": 6.0,
+    "kind": "golden",
+    "note": "Open Valve -> VALVE OPEN"
   },
   {
-    "start": 7.0,
-    "end": 9.0,
+    "start": 6.0,
+    "end": 8.0,
     "kind": "dross",
     "note": "wrong tab: Settings (excursion start)"
   },
   {
-    "start": 9.0,
-    "end": 11.0,
+    "start": 8.0,
+    "end": 10.0,
     "kind": "dross",
     "note": "back to Main, same state (revert)"
   },
   {
-    "start": 11.0,
+    "start": 10.0,
     "end": 13.0,
-    "kind": "golden",
-    "note": "Open Valve -> Valve OPEN"
+    "kind": "dross",
+    "note": "mouse wander, no UI change"
   },
   {
     "start": 13.0,
     "end": 15.0,
     "kind": "golden",
-    "note": "set Flow setpoint 50 mL/min"
+    "note": "Set Flow setpoint 50 mL/min"
+  },
+  {
+    "start": 15.0,
+    "end": 17.0,
+    "kind": "golden",
+    "note": "Enable Heater -> HEATER ON"
+  },
+  {
+    "start": 17.0,
+    "end": 22.0,
+    "kind": "golden",
+    "note": "Set Temp setpoint 65 C (hold to stabilize)"
+  },
+  {
+    "start": 22.0,
+    "end": 24.0,
+    "kind": "golden",
+    "note": "Engage Data logging -> RUN LOGGING"
   }
 ]

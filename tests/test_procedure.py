@@ -42,7 +42,7 @@ def test_held_accounting_is_recall_safe_decomposition(extracted_run):
             assert s.held_seconds == 0.0
         else:
             assert s.held_seconds > 0.0
-    # the synthetic clip's fused pump+wander stretch (5s) must surface held time
+    # the synthetic clip's temp-stabilize hold (5s, past the 3s active cap) must surface held time
     assert any(s.held_seconds > 0 for s in proc.steps)
     md = render_markdown(proc)
     assert "held" in md  # the honest decomposition reaches the rendered procedure

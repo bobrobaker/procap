@@ -1,13 +1,18 @@
 """A dependency-free local web demo of the procap pipeline.
 
-Reads the on-disk artifacts a run produces (see procap.run) and renders them as a
-single page that walks the four stages in order: keyframes -> golden/dross
-segments -> synthesized procedure -> audit. The point is to make the pipeline's
-*judgement* legible — which stretches it kept and why, what it dropped, how it
-timed the result — not just to dump JSON.
+Reads the on-disk artifacts a run produces (see procap.run) and renders one of two
+purpose-distinct demos, chosen structurally by RunView.mode:
+  - Demo A (note-taking): document an existing procedure into an SOP. ProCap guesses
+    golden/dross and drafts timed steps; the operator retags wrong guesses, annotates
+    each step, adds off-screen steps, and exports a PDF.
+  - Demo B (conformance): qualify a recording against a *provided* SOP. ProCap reports
+    where they diverge; the reviewer confirms or dismisses each flag and exports a PDF.
+Both walk the pipeline stages (keyframes -> golden/dross -> procedure [-> audit]) so the
+*judgement* stays legible. Edits are in-memory only (no write path); the PDF is the
+durable output, produced by the browser's print-to-PDF over the live edited DOM.
 
-No web framework: this is the stdlib http.server so the demo carries zero new
-dependency (procap's heuristics are the always-on baseline; the demo should be too).
+No web framework: stdlib http.server + a small vanilla-JS layer, so the demo carries
+zero dependency (procap's heuristics are the always-on baseline; the demo should be too).
 
 Run it:
     python -m procap.webdemo                 # serve every run under runs/
@@ -22,7 +27,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
 
-from .model import Procedure, Segment, Keyframe, AuditReport, SegmentKind, FindingKind
+from .model import (
+    Procedure, Segment, Keyframe, AuditReport, SegmentKind, FindingKind, AuditMethod,
+)
 from .eval import score_against_labels
 
 EVAL_STEP = 0.1  # time-grid resolution the scorer uses; reused to convert grid points -> seconds
@@ -92,6 +99,20 @@ class RunView:
         return any(s.judged_by == "vlm" for s in self.segments)
 
     @property
+    def mode(self) -> str:
+        """Which of the two demos this run drives, decided structurally (not by name):
+        - "conformance" (Demo B): the run carries a *content* audit (lexical/VLM) against a
+          provided SOP — the workflow is qualifying a recording against that doc.
+        - "notetaking" (Demo A): no content audit — the workflow is documenting an existing
+          procedure into an SOP, guessing golden/dross for the operator to retag and annotate.
+        A run with only a structural (count) audit is still note-taking: nothing to match yet."""
+        if self.audit and self.audit.method in (
+            AuditMethod.LEXICAL.value, AuditMethod.VLM.value
+        ):
+            return "conformance"
+        return "notetaking"
+
+    @property
     def keyframe_by_index(self) -> dict[int, Keyframe]:
         return {k.index: k for k in self.keyframes}
 
@@ -121,9 +142,6 @@ header.top { background: #0d1117; color: #e6edf3; padding: 18px 28px; }
 header.top h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
 header.top .tag { color: #8b949e; font-size: 13px; margin-top: 3px; }
 .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 28px 80px; }
-.runbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
-.runbar a { padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; background: #fff; font-size: 13px; }
-.runbar a.active { background: var(--ink); color: #fff; border-color: var(--ink); }
 .stage { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px; margin-bottom: 22px; }
 .stage > h2 { margin: 0 0 4px; font-size: 17px; display: flex; align-items: baseline; gap: 10px; }
 .stage > h2 .n { color: #fff; background: var(--accent); border-radius: 6px; font-size: 12px; padding: 2px 8px; }
@@ -186,32 +204,6 @@ header.top .tag { color: #8b949e; font-size: 13px; margin-top: 3px; }
 .badge-note { color: #8b949e; font-size: 11px; margin-left: 8px; }
 footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px; }
 
-/* value hero */
-.hero { position: relative; background: linear-gradient(135deg, #0d1117, #1b2535); color: #e6edf3; border-radius: 14px; padding: 30px 30px 26px; margin: 4px 0 26px; }
-.hero-toggle { position: absolute; top: 12px; right: 14px; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.22); color: #c9d4e0; border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
-.hero-toggle:hover { background: rgba(255,255,255,.18); }
-.hero.collapsed { padding: 10px 30px; margin-bottom: 16px; }
-.hero.collapsed > *:not(.hero-toggle) { display: none; }
-.hero.collapsed::before { content: "procap — screen recording → written procedure"; color: #8b949e; font-size: 13px; }
-.hero h2 { margin: 0 0 9px; font-size: 26px; color: #fff; letter-spacing: .2px; }
-.hero .pitch { font-size: 15.5px; line-height: 1.55; color: #c9d4e0; max-width: 64ch; margin: 0 0 22px; }
-.hero .pitch b { color: #fff; }
-.trim { background: rgba(212,160,23,.14); border: 1px solid rgba(212,160,23,.45); color: #ffe6a3; border-radius: 10px; padding: 12px 16px; margin: 0 0 18px; font-size: 15px; }
-.trim b { color: #fff; }
-.transform { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.tcard { background: #fff; color: var(--ink); border-radius: 10px; padding: 12px; width: 286px; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
-.tcard .k { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin-bottom: 8px; }
-.tcard img { width: 100%; height: 156px; object-fit: cover; border-radius: 6px; background: #000; display: block; }
-.tcard.out h3 { margin: 2px 0 5px; font-size: 17px; }
-.tcard .meta { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
-.tarrow { font-size: 30px; color: #8b949e; font-weight: 700; }
-.flow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px; }
-.flow span { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.16); color: #c9d4e0; border-radius: 999px; padding: 5px 13px; font-size: 12.5px; }
-.flow b { color: #fff; margin-right: 3px; }
-.flow code, .hero code { background: rgba(255,255,255,.13); color: #fff; padding: 0 5px; border-radius: 4px; font-size: 12px; }
-.runbar-label { align-self: center; color: var(--muted); font-size: 12px; margin-right: 2px; }
-.layer-h { margin: 8px 0 2px; font-size: 19px; }
-.layer-intro { color: var(--muted); font-size: 13.5px; max-width: 70ch; margin: 0 0 16px; }
 .frame a { display: block; cursor: zoom-in; }
 .muted { color: var(--muted); }
 
@@ -245,6 +237,101 @@ ol.how li { margin: 7px 0; font-size: 14px; }
 dl.faq { margin: 4px 0 16px; }
 dl.faq dt { font-weight: 650; margin-top: 14px; font-size: 14.5px; }
 dl.faq dd { margin: 4px 0 0; color: #2c333a; font-size: 13.8px; }
+
+/* product-level "About ProCap" card: why + term gloss + nested how/faq */
+.about { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 24px; margin: 0 0 20px; }
+.about > h2 { margin: 0 0 6px; font-size: 18px; }
+.about .why { font-size: 14px; color: var(--ink); margin: 0 0 12px; max-width: 76ch; }
+/* golden/dross gloss — a one-liner each, not a header-sized block */
+.gloss { display: flex; gap: 22px; flex-wrap: wrap; margin: 0; font-size: 13px; }
+.gloss span { color: var(--muted); }
+.gloss b { color: var(--ink); }
+.gloss b i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: 0; }
+/* nested collapsibles inside about/demoblock shed their own card chrome */
+.about .disc, .demoblock .disc { border: none; border-top: 1px solid var(--line); border-radius: 0; padding: 0; margin: 6px 0 0; background: transparent; }
+.about .disc > summary, .demoblock .disc > summary { font-size: 14px; padding: 11px 0 7px; }
+
+/* one card per demo: header (intro) + the output + an evidence collapsible — no box-in-box */
+.demoblock { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 24px 10px; margin: 0 0 22px; }
+.demoblock .demointro { border: none; border-radius: 0; padding: 0; margin: 0 0 16px; background: transparent; }
+.demoblock .demointro h2 { font-size: 18px; }
+.demoblock .stage { border: none; border-radius: 0; padding: 0; margin: 0 0 16px; background: transparent; }
+.demoblock .disc .stage:last-child { margin-bottom: 8px; }
+.metaline { margin: 12px 0 6px; }
+.metaline .tag { color: var(--muted); font-size: 12px; }
+
+/* demo chooser + per-demo intro */
+.chooser { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 8px; }
+.chooser a { flex: 1 1 320px; border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; background: #fff; color: var(--ink); }
+.chooser a.active { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.chooser a .dlabel { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); font-weight: 700; }
+.chooser a.active .dlabel { color: var(--ink); }
+.chooser a .dname { display: block; font-size: 15.5px; font-weight: 650; margin-top: 2px; }
+.chooser a .dsub { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.demointro { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; margin: 0 0 22px; }
+.demointro h2 { margin: 0 0 6px; font-size: 19px; }
+.demointro .purpose { font-size: 14.5px; color: var(--ink); margin: 0 0 12px; max-width: 72ch; }
+.demointro .purpose b { color: var(--ink); }
+.demointro .steps-of { display: flex; gap: 8px; flex-wrap: wrap; }
+.demointro .steps-of span { background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 5px 13px; font-size: 12.5px; color: var(--muted); }
+.demointro .steps-of b { color: var(--ink); margin-right: 4px; }
+.demointro .proof { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
+.demointro .proof b { color: var(--good); }
+
+/* toolbar (export / add-blank) */
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 16px; }
+.btn { border: 1px solid var(--line); background: #fff; color: var(--ink); border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer; font: inherit; }
+.btn:hover { background: var(--bg); }
+.btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn.primary:hover { background: #2c333a; }
+
+/* editable procedure step (note-taking mode) */
+.step.dross { opacity: .62; }
+.step.dross .num { background: var(--dross); }
+.step .tagrow { display: flex; align-items: center; gap: 10px; margin: 4px 0 0; }
+.step .tag-state { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; padding: 1px 8px; border-radius: 999px; }
+.step.golden .tag-state { background: var(--golden-bg); color: var(--golden-line); }
+.step.dross .tag-state { background: var(--dross-bg); color: var(--muted); }
+.retag { border: 1px solid var(--line); background: #fff; border-radius: 7px; padding: 3px 10px; font-size: 12px; cursor: pointer; font: inherit; color: var(--accent); }
+.retag:hover { background: var(--bg); }
+.notes { display: block; width: 100%; margin-top: 9px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; resize: vertical; min-height: 38px; color: var(--ink); background: #fff; }
+.notes::placeholder { color: #9aa0a6; }
+.step .noframe { width: 92px; height: 58px; border-radius: 6px; border: 1px dashed var(--line); display: flex; align-items: center; justify-content: center; text-align: center; font-size: 10px; color: var(--muted); background: var(--bg); padding: 4px; }
+.blankstep .body h3 { color: var(--muted); }
+
+/* confirm/deny verdict (conformance mode) */
+.finding .verdict { display: flex; gap: 8px; margin-top: 9px; align-items: center; }
+.vbtn { border: 1px solid var(--line); background: #fff; border-radius: 7px; padding: 3px 12px; font-size: 12px; cursor: pointer; font: inherit; }
+.vbtn:hover { background: var(--bg); }
+.vbtn.on-confirm.active { background: var(--bad); color: #fff; border-color: var(--bad); }
+.vbtn.on-deny.active { background: var(--good); color: #fff; border-color: var(--good); }
+.vstate { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+.finding.confirmed { border-left-color: var(--bad); }
+.finding.denied { border-left-color: var(--good); background: #f2fbf4; }
+.finding.denied .vstate { color: var(--good); }
+.finding.confirmed .vstate { color: var(--bad); }
+
+/* print → PDF: only the edited procedure (A) / reviewed findings (B) — screen frame + notes
+   per step, nothing else. Everything but the active editor/review section is dropped. */
+@media print {
+  body { background: #fff; }
+  .no-print { display: none !important; }
+  header.top, footer, .about, .chooser, .metaline, .demointro, .disc { display: none !important; }
+  .stage:not([data-editor]):not([data-review]) { display: none !important; }
+  .wrap { max-width: none; padding: 0; }
+  .demoblock { border: none; border-radius: 0; padding: 0; margin: 0; background: #fff; }
+  .stage { border: none; border-radius: 0; padding: 0; margin: 0; }
+  .stage > h2 { display: none; }
+  .step { break-inside: avoid; page-break-inside: avoid; border-bottom: 1px solid #ddd; }
+  .step.dross { display: none !important; }  /* retagged-out steps leave the exported SOP */
+  .step.dross .num { background: var(--ink); }
+  .notes { border: none; padding: 4px 0; min-height: 0; resize: none; }
+  .finding { break-inside: avoid; page-break-inside: avoid; }
+  .printtitle { display: block !important; font-size: 22px; font-weight: 700; margin: 0 0 4px; }
+  .printmeta { display: block !important; color: #555; font-size: 12px; margin: 0 0 18px; }
+  a[href]::after { content: ""; }  /* don't print URLs after links */
+}
+.printtitle, .printmeta { display: none; }
 """
 
 
@@ -261,40 +348,6 @@ def _fmt_t(t: float) -> str:
 def _img_src(run_name: str, kf: Keyframe) -> str:
     # serve via /img?run=<name>&file=<basename>
     return f"/img?run={quote(run_name)}&file={quote(Path(kf.path).name)}"
-
-
-def _render_stats(rv: RunView) -> str:
-    n_gold = n_dross = 0
-    if rv.segments:
-        n_gold = sum(1 for s in rv.segments if s.kind == SegmentKind.GOLDEN)
-        n_dross = sum(1 for s in rv.segments if s.kind == SegmentKind.DROSS)
-    cells = [
-        ("Duration", _fmt_t(rv.duration), "Total length of the source recording (ffprobe)."),
-        ("Keyframes", str(len(rv.keyframes)), "Frames the screen durably changed to, after de-duplication."),
-        ("Golden", str(n_gold), "Stretches kept as consequential actions."),
-        ("Dross", str(n_dross), "Stretches dropped (reverted, idle, mouse-wander)."),
-    ]
-    if rv.procedure:
-        cells.append(("Procedure steps", str(len(rv.procedure.steps)),
-                      "One step synthesized per kept (golden) keyframe."))
-        cells.append(("Est. time", _fmt_t(rv.procedure.total_est_seconds),
-                      "Sum of step time estimates, carried from segment spans."))
-    if rv.audit:
-        # Honest headline: a matched-step COUNT, not a green "%coverage" — the % read as a
-        # content audit even when it was a positional count. The §4 section carries the method.
-        cov_tip = "Generated steps the written doc covers, out of all generated steps."
-        if rv.procedure and rv.procedure.steps:
-            n = len(rv.procedure.steps)
-            covered = round(rv.audit.coverage * n)
-            cells.append(("Doc steps matched", f"{covered}/{n}", cov_tip))
-        else:
-            cells.append(("Doc steps matched", f"{rv.audit.coverage*100:.0f}%", cov_tip))
-    inner = "".join(
-        f'<div class="stat" title="{_esc(t)}"><div class="v">{_esc(v)}</div>'
-        f'<div class="l">{_esc(l)}</div></div>'
-        for l, v, t in cells
-    )
-    return f'<div class="statgrid">{inner}</div>'
 
 
 def _golden_kf_indexes(rv: RunView) -> set[int]:
@@ -327,10 +380,7 @@ def _kf_step_map(rv: RunView) -> dict[int, int]:
 def _render_keyframes(rv: RunView) -> str:
     golden = _golden_kf_indexes(rv)
     classified = rv.segments is not None
-    seg_of = _kf_segment_map(rv)
-    step_of = _kf_step_map(rv)
     frames = []
-    boxes = []
     for kf in rv.keyframes:
         cls = ""
         if classified:
@@ -340,15 +390,35 @@ def _render_keyframes(rv: RunView) -> str:
             f'<br>Δ {kf.change_score:.3f}'
             f'{" · click" if kf.click_detected else ""}</div>'
         )
-        # clickable: anchor to a :target lightbox so a skeptic can audit this exact call (no JS)
+        # clickable: anchor to a lightbox (id emitted by _keyframe_lightboxes at page level)
         frames.append(
             f'<div class="frame {cls}"><a href="#kf-{rv.name}-{kf.index}" data-lb="kf-{rv.name}-{kf.index}">'
             f'<img loading="lazy" src="{_img_src(rv.name, kf)}" alt="keyframe {kf.index}"></a>'
             f"{cap}</div>"
         )
+    lede = (
+        "Every frame the screen durably changed <em>to</em>, sampled and de-duplicated "
+        "by perceptual-hash diff. Border colour shows the stage-2 verdict (gold = kept, "
+        "grey = dropped). <b>Click any frame</b> to see why it was kept or dropped and which "
+        "step it became."
+    )
+    return (
+        '<section class="stage" id="stage-keyframes"><h2>Keyframes</h2>'
+        f'<p class="lede">{lede}</p>'
+        f'<div class="film">{"".join(frames)}</div></section>'
+    )
+
+
+def _keyframe_lightboxes(rv: RunView) -> str:
+    """The per-keyframe verdict overlays, emitted at PAGE level so they work even when the
+    keyframe filmstrip lives inside a collapsed <details> (a fixed overlay inside a closed
+    <details> is hidden). Both the filmstrip and the procedure thumbnails anchor to these."""
+    seg_of = _kf_segment_map(rv)
+    step_of = _kf_step_map(rv)
+    boxes = []
+    for kf in rv.keyframes:
         seg = seg_of.get(kf.index)
         if seg is not None:
-            kind = "golden" if seg.kind == SegmentKind.GOLDEN else "dross"
             if kf.index in step_of:
                 verdict = f'<span class="pill golden">KEPT</span> → became <b>step {step_of[kf.index]}</b>'
             else:
@@ -377,24 +447,13 @@ def _render_keyframes(rv: RunView) -> str:
             f'<p class="muted" title="{delta_title}">change Δ {kf.change_score:.3f} vs previous kept frame'
             f'{" · click detected" if kf.click_detected else ""}</p></div></div></div>'
         )
-    lede = (
-        "Every frame the screen durably changed <em>to</em>, sampled and de-duplicated "
-        "by perceptual-hash diff. Border colour shows the stage-2 verdict (gold = kept, "
-        "grey = dropped). <b>Click any frame</b> to see why it was kept or dropped and which "
-        "step it became — audit the call yourself."
-    )
-    return (
-        '<section class="stage" id="stage-keyframes"><h2><span class="n">1</span> Keyframes</h2>'
-        f'<p class="lede">{lede}</p>'
-        f'<div class="film">{"".join(frames)}</div></section>'
-        + "".join(boxes)
-    )
+    return "".join(boxes)
 
 
 def _render_segments(rv: RunView) -> str:
     if rv.segments is None:
         return (
-            '<section class="stage"><h2><span class="n">2</span> Golden / dross</h2>'
+            '<section class="stage"><h2>Golden / dross</h2>'
             '<p class="empty">Not run yet — run the <code>golden</code> stage.</p></section>'
         )
     total = rv.duration or sum(s.duration for s in rv.segments) or 1.0
@@ -454,7 +513,7 @@ def _render_segments(rv: RunView) -> str:
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
     return (
-        '<section class="stage" id="stage-golden"><h2><span class="n">2</span> Golden / dross</h2>'
+        '<section class="stage" id="stage-golden"><h2>Golden / dross</h2>'
         f'<p class="lede">{lede}</p>'
         f'{legend}<div class="timeline">{"".join(bars)}</div>'
         f'<div class="axis"><span>0:00</span><span>{_fmt_t(total)}</span></div>'
@@ -539,7 +598,7 @@ def _render_eval(rv: RunView) -> str:
         "not out-of-sample accuracy.</p>"
     )
     return (
-        '<section class="stage" id="stage-eval"><h2><span class="n">2·eval</span> Accuracy vs ground truth</h2>'
+        '<section class="stage" id="stage-eval"><h2>Accuracy vs ground truth</h2>'
         f'<p class="lede">{lede}</p>'
         f"{knob_line}{caveat}"
         f'<div class="statgrid" style="margin-bottom:16px">{metrics}</div>'
@@ -556,17 +615,49 @@ def _render_eval(rv: RunView) -> str:
     )
 
 
-def _render_procedure(rv: RunView) -> str:
+def _est_html(st) -> str:
+    """The step's time estimate, splitting out any hold past the active-action cap."""
+    if st.held_seconds > 0:
+        active = max(0.0, st.est_seconds - st.held_seconds)
+        held_title = (
+            "est = the full segment span. 'held' = the part beyond the active-action "
+            "threshold (max active) that the state just sat unchanged; pixels can't tell "
+            "active work from waiting, so it is reported separately, not hidden."
+        )
+        return (
+            f"est {_fmt_t(st.est_seconds)} "
+            f'<span class="held" title="{held_title}">(≤{_fmt_t(active)} active + '
+            f'{_fmt_t(st.held_seconds)} held — attribution unknown)</span>'
+        )
+    return f"est {_fmt_t(st.est_seconds)}"
+
+
+_BLANK_STEP_TEMPLATE = (
+    '<template id="blankstep-tpl">'
+    '<div class="step golden blankstep" data-step data-kind="golden" data-blank>'
+    '<div class="num">+</div>'
+    '<div class="body"><h3>Off-screen step</h3>'
+    '<div class="meta">no screen frame — manual entry</div>'
+    '<div class="tagrow no-print"><span class="tag-state">golden — kept</span>'
+    '<button type="button" class="retag" data-retag>Retag as dross</button>'
+    '<button type="button" class="retag" data-remove>Remove</button></div>'
+    '<textarea class="notes" data-notes placeholder="Describe the off-screen work the '
+    'recording could not capture (e.g. a physical action at the bench)…"></textarea></div>'
+    '<div class="thumbs"><div class="noframe">no screen frame</div></div></div></template>'
+)
+
+
+def _render_procedure(rv: RunView, interactive: bool = False) -> str:
     if rv.procedure is None:
         return (
-            '<section class="stage"><h2><span class="n">3</span> Procedure</h2>'
+            '<section class="stage"><h2>Procedure</h2>'
             '<p class="empty">Not run yet — run the <code>procedure</code> stage.</p></section>'
         )
     kbi = rv.keyframe_by_index
     steps = []
     for st in rv.procedure.steps:
         # thumbnails link to the same :target lightboxes the keyframe stage emits, so a user
-        # can audit "is this really one action?" right where they evaluate the output.
+        # can open "is this really one action?" right where they evaluate the output.
         thumbs = "".join(
             f'<a href="#kf-{rv.name}-{i}" data-lb="kf-{rv.name}-{i}"><img loading="lazy" src="{_img_src(rv.name, kbi[i])}" alt="kf {i}"></a>'
             for i in st.keyframe_indexes
@@ -575,45 +666,69 @@ def _render_procedure(rv: RunView) -> str:
         title = _esc(st.title)
         if "[fill in" in st.title:
             title = f'<span class="todo">{title}</span>'
-        intent = (
-            f'<div class="intent">{_esc(st.intent)}</div>' if st.intent else ""
+        meta = (
+            f'<div class="meta">{_fmt_t(st.start_t)}–{_fmt_t(st.end_t)} · '
+            f"{_est_html(st)} · keyframes {', '.join('#'+str(i) for i in st.keyframe_indexes)}</div>"
         )
-        desc = f'<div class="intent">{_esc(st.description)}</div>' if st.description else ""
-        if st.held_seconds > 0:
-            active = max(0.0, st.est_seconds - st.held_seconds)
-            held_title = (
-                "est = the full segment span. 'held' = the part beyond the active-action "
-                "threshold (max active) that the state just sat unchanged; pixels can't tell "
-                "active work from waiting, so it is reported separately, not hidden."
-            )
-            est_html = (
-                f"est {_fmt_t(st.est_seconds)} "
-                f'<span class="held" title="{held_title}">(≤{_fmt_t(active)} active + '
-                f'{_fmt_t(st.held_seconds)} held — attribution unknown)</span>'
+        if interactive:
+            # Note-taking mode: the operator can retag a wrong guess and annotate each step.
+            # The notes box is the real input here, so a still-placeholder title shows as a
+            # clean "Step N" rather than the raw [fill in] marker.
+            notes = _esc(st.intent or "")
+            heading = f"Step {st.index + 1}" if "[fill in" in st.title else title
+            steps.append(
+                '<div class="step golden" data-step data-kind="golden">'
+                f'<div class="num">{st.index + 1}</div>'
+                '<div class="body">'
+                f"<h3>{heading}</h3>{meta}"
+                '<div class="tagrow no-print"><span class="tag-state">golden — kept</span>'
+                '<button type="button" class="retag" data-retag>Retag as dross</button></div>'
+                '<textarea class="notes" data-notes placeholder="Add a note for this step…">'
+                f"{notes}</textarea></div>"
+                f'<div class="thumbs">{thumbs}</div>'
+                "</div>"
             )
         else:
-            est_html = f"est {_fmt_t(st.est_seconds)}"
-        steps.append(
-            '<div class="step">'
-            f'<div class="num">{st.index + 1}</div>'
-            '<div class="body">'
-            f"<h3>{title}</h3>"
-            f'<div class="meta">{_fmt_t(st.start_t)}–{_fmt_t(st.end_t)} · '
-            f"{est_html} · keyframes {', '.join('#'+str(i) for i in st.keyframe_indexes)}</div>"
-            f"{desc}{intent}</div>"
-            f'<div class="thumbs">{thumbs}</div>'
-            "</div>"
+            intent = f'<div class="intent">{_esc(st.intent)}</div>' if st.intent else ""
+            desc = f'<div class="intent">{_esc(st.description)}</div>' if st.description else ""
+            steps.append(
+                '<div class="step">'
+                f'<div class="num">{st.index + 1}</div>'
+                f'<div class="body"><h3>{title}</h3>{meta}{desc}{intent}</div>'
+                f'<div class="thumbs">{thumbs}</div>'
+                "</div>"
+            )
+
+    if interactive:
+        lede = (
+            "ProCap drafted one ordered step per kept (golden) moment, timed from the "
+            "recording. Retag any step it misjudged, add a note to each, and add off-screen "
+            "steps for work the recording could not capture — then save the result as a PDF."
         )
+        toolbar = (
+            '<div class="toolbar no-print">'
+            '<button type="button" class="btn" data-addblank>+ Add off-screen step</button>'
+            '<button type="button" class="btn primary" data-print>Save as PDF</button></div>'
+        )
+        title_block = (
+            '<div class="printtitle">Standard operating procedure</div>'
+            f'<div class="printmeta">Drafted by ProCap from {_esc(rv.meta.get("source_video", rv.name))}</div>'
+        )
+        return (
+            '<section class="stage" id="stage-procedure" data-editor>'
+            '<h2>Draft procedure</h2>'
+            f'<p class="lede no-print">{lede}</p>{toolbar}{title_block}'
+            f'{"".join(steps)}{_BLANK_STEP_TEMPLATE}</section>'
+        )
+
     lede = (
-        "One ordered step per kept keyframe, with a time estimate carried from the "
-        "segment span. A stretch held longer than the active-action threshold is reported "
-        "honestly as <span class='held'>≤X active + Y held (attribution unknown)</span> — "
-        "pixels alone can't tell active work from waiting. Intent / titles are the manual "
-        "fill-in the operator supplies, or the VLM proposes when enabled (grouping "
-        "consecutive keyframes into one step is later-phase work, not yet built)."
+        "One ordered step per kept keyframe, with a time estimate carried from the segment "
+        "span. A stretch held longer than the active-action threshold is reported as "
+        "<span class='held'>≤X active + Y held (attribution unknown)</span> — pixels alone "
+        "can't tell active work from waiting."
     )
     return (
-        '<section class="stage" id="stage-procedure"><h2><span class="n">3</span> Procedure '
+        '<section class="stage" id="stage-procedure"><h2>Procedure '
         f'— {_esc(rv.procedure.title)}</h2>'
         f'<p class="lede">{lede}</p>{"".join(steps)}</section>'
     )
@@ -646,12 +761,18 @@ def _render_audit(rv: RunView) -> str:
         items = by_kind.get(kind, [])
         if not items:
             continue
+        verdict = (
+            '<div class="verdict">'
+            '<button type="button" class="vbtn on-confirm no-print" data-confirm>Confirm gap</button>'
+            '<button type="button" class="vbtn on-deny no-print" data-deny>Not a gap</button>'
+            '<span class="vstate" data-vstate>Unreviewed</span></div>'
+        )
         rows = "".join(
-            '<div class="finding">'
+            '<div class="finding" data-finding>'
             f'<div class="k">{_esc(label)}'
             f'{" · step " + str(f.procedure_step_index + 1) if f.procedure_step_index is not None else ""}'
             f'{" · " + _esc(f.doc_ref) if f.doc_ref else ""}</div>'
-            f"{_esc(f.detail)}</div>"
+            f"{_esc(f.detail)}{verdict}</div>"
             for f in items
         )
         groups_html.append(
@@ -663,11 +784,11 @@ def _render_audit(rv: RunView) -> str:
     else:
         fin = '<p class="empty">No gaps found — your written doc covers every step the recording shows.</p>'
 
-    # The recording is the reference; the written doc is what's being graded against it.
+    # The recording is the reference; the written doc is what's being checked against it.
     ref_line = (
-        '<p class="lede"><b>The recording is treated as ground truth</b> — this checks your '
-        "written SOP <em>against</em> it. It grades the doc, not the tool: coverage is the "
-        "fraction of the steps the recording shows that your SOP also covers.</p>"
+        '<p class="lede no-print">The recording is treated as the reference. ProCap matched '
+        "each step it captured against the provided SOP and flagged where they diverge. "
+        "Confirm or dismiss each flag, then save the reviewed result as a PDF.</p>"
     )
 
     # Plain count, never a grade-colored percentage. covered = generated steps the doc covers.
@@ -717,12 +838,21 @@ def _render_audit(rv: RunView) -> str:
             )
         )
     method_html = (
-        f'<p style="margin:8px 0 0;font-size:12px;color:var(--muted)">{method_line}</p>'
+        f'<p class="no-print" style="margin:8px 0 0;font-size:12px;color:var(--muted)">{method_line}</p>'
+    )
+    toolbar = (
+        '<div class="toolbar no-print">'
+        '<button type="button" class="btn primary" data-print>Save as PDF</button></div>'
+    )
+    title_block = (
+        '<div class="printtitle">SOP conformance review</div>'
+        f'<div class="printmeta">{_esc(rv.audit.written_doc)} checked against '
+        f'{_esc(rv.meta.get("source_video", rv.name))}</div>'
     )
     return (
-        '<section class="stage" id="stage-audit"><h2><span class="n">4</span> '
-        "Does your written doc match the recording?</h2>"
-        f"{ref_line}{gap}{fin}{method_html}</section>"
+        '<section class="stage" id="stage-audit" data-review><h2>'
+        "Conformance against the provided SOP</h2>"
+        f"{ref_line}{toolbar}{title_block}{gap}{fin}{method_html}</section>"
     )
 
 
@@ -850,8 +980,8 @@ def _render_faq(rv: "RunView | None") -> str:
          "runs offline with heuristics. A vision-model key only adds auto-written step titles "
          "and a semantic (content) audit; nothing breaks without one."),
         ("How accurate is the keep/drop call?",
-         "It's measured against ground truth, shown in the “Accuracy vs ground truth” panel "
-         "above, not asserted." + acc),
+         "It's measured against ground truth, shown in the accuracy panel in the note-taking "
+         "demo's evidence section, not asserted." + acc),
         ("When will the steps be wrong / what's it bad at?",
          "Three honest limits, all surfaced in the page: (1) idle or dead time that never "
          "reverts isn't detected yet, so a step's time can include waiting — shown as “held” "
@@ -870,132 +1000,133 @@ def _render_faq(rv: "RunView | None") -> str:
 
 
 def _default_active(runs: list[Path]) -> Path | None:
-    """Land on a run that has ground-truth labels, so the accuracy overlay (the proof the
-    keep/drop call works) leads — not the alphabetically-first run, which buries it."""
+    """Land on Demo A (conformance) — the first card — so the page opens on what's labelled
+    A. Falls back to the first run if no conformance run is present."""
     for p in runs:
-        if RunView(p).labels:
+        if RunView(p).mode == "conformance":
             return p
     return runs[0] if runs else None
 
 
-def _pick_showcase(runs: list[Path]):
-    """(RunView, ProcedureStep, Keyframe) for an input→output example with REAL step text
-    (filled intent or a VLM/non-placeholder title), or None. Never returns a placeholder step:
-    the hero must not present a `[fill in]` slot as if it were a generated result."""
+def _demo_label(rv: RunView) -> tuple[str, str, str]:
+    """(letter, name, one-line purpose) for the run's demo, by its structural mode. The cards
+    render conformance-first (sorted run order), so conformance carries the 'A' label and the
+    pair reads A → B left to right."""
+    if rv.mode == "conformance":
+        return ("A", "Qualify against an SOP", "Recording vs a provided SOP")
+    return ("B", "Document a procedure", "Recording → a written SOP")
+
+
+def _render_demo_chooser(runs: list[Path], active: Path | None) -> str:
+    """Two cards, one per run, each naming its demo and purpose (not the raw run dir name)."""
+    cards = []
     for p in runs:
-        rv = RunView(p)
-        if not rv.procedure or not rv.procedure.steps:
-            continue
-        kbi = rv.keyframe_by_index
-        for st in rv.procedure.steps:
-            kf = next((kbi[i] for i in st.keyframe_indexes if i in kbi), None)
-            if kf is None:
-                continue
-            if "[fill in" not in st.title or st.intent.strip():
-                return rv, st, kf
-    return None
-
-
-def _first_renderable_step(rv: RunView):
-    """(step, keyframe) for the first step with an existing keyframe image, or (None, None)."""
-    if not rv.procedure:
-        return None, None
-    kbi = rv.keyframe_by_index
-    for st in rv.procedure.steps:
-        kf = next((kbi[i] for i in st.keyframe_indexes if i in kbi), None)
-        if kf is not None:
-            return st, kf
-    return None, None
-
-
-def _render_hero(runs: list[Path]) -> str:
-    """The value pitch, the transform at a glance, and the usage flow — outside-in framing for a
-    newcomer. Everything shown is something the pipeline genuinely did on a real run: the trim
-    story is deterministic offline, and the step transform appears only with real step text (no
-    fabricated title — the prior failure mode)."""
-    pitch = (
-        "procap watches a screen recording of you doing a task and writes the step-by-step "
-        "procedure for you — <b>timed, ordered, with the mis-clicks and dead time already "
-        "trimmed</b>. Record the task once instead of hand-writing the SOP."
-    )
-    show = _pick_showcase(runs)
-    hero_rv = show[0] if show else (RunView(_default_active(runs)) if runs else None)
-
-    # Trim story — TRUE offline for any video (dross removal is deterministic, no key needed).
-    trim = ""
-    if hero_rv and hero_rv.segments is not None and hero_rv.procedure is not None:
-        n_dross = sum(1 for s in hero_rv.segments if s.kind == SegmentKind.DROSS)
-        n_steps = len(hero_rv.procedure.steps)
-        est = hero_rv.procedure.total_est_seconds
-        dropped = (
-            f"dropped <b>{n_dross}</b> dead-end / idle stretch{'es' if n_dross != 1 else ''}"
-            if n_dross else "found no fumbles to drop"
+        letter, name, sub = _demo_label(RunView(p))
+        on = " active" if active and p == active else ""
+        cards.append(
+            f'<a class="card{on}" href="/?run={quote(p.name)}">'
+            f'<span class="dlabel">Demo {letter}</span>'
+            f'<span class="dname">{_esc(name)}</span>'
+            f'<span class="dsub">{_esc(sub)}</span></a>'
         )
-        trim = (
-            '<div class="trim">From <b>'
-            f"{_fmt_t(hero_rv.duration)}</b> of recording, procap {dropped} and wrote "
-            f"<b>{n_steps}</b> timed steps ({_fmt_t(est)} total) — a draft procedure, no "
-            "hand-writing.</div>"
-        )
+    return f'<div class="chooser">{"".join(cards)}</div>'
 
-    # Step transform — only with REAL step text; otherwise an honest draft slot (no fabrication).
-    transform = ""
-    if show:
-        rv, st, kf = show
-        held = ""
-        if st.held_seconds > 0:
-            active = max(0.0, st.est_seconds - st.held_seconds)
-            held = f" · ≤{_fmt_t(active)} active + {_fmt_t(st.held_seconds)} held"
-        out = (
-            '<div class="tcard out"><div class="k">Output — a procedure step</div>'
-            f"<h3>{_esc(st.intent.strip() or st.title)}</h3>"
-            f'<div class="meta">est {_fmt_t(st.est_seconds)}{held} · auto-timed from the recording</div></div>'
+
+def _render_demo_intro(rv: RunView) -> str:
+    """The purpose of THIS demo and what its controls do — distinct per mode."""
+    letter, name, _sub = _demo_label(rv)
+    chips = []
+    proof = ""  # honesty line, promoted onto the first screenful of the tab that owns it
+    if rv.mode == "conformance":
+        purpose = (
+            "You are performing a <b>provided</b> SOP to validate it. ProCap matches your "
+            "recording against that SOP and reports where they diverge — steps it shows "
+            "that the SOP omits, steps documented out of order, and steps the SOP describes "
+            "but the recording never performs. Confirm or dismiss each flag, then save the "
+            "reviewed result as a PDF."
         )
-    elif hero_rv:
-        st, kf = _first_renderable_step(hero_rv)
-        if kf is not None:
-            out = (
-                '<div class="tcard out"><div class="k">Output — a procedure step</div>'
-                '<h3 class="todo">[ you write the action, or a vision model fills it ]</h3>'
-                f'<div class="meta">timed slot {_fmt_t(st.start_t)}–{_fmt_t(st.end_t)} · est '
-                f"{_fmt_t(st.est_seconds)} — the timing & ordering are automatic; the wording is the "
-                "one thing left to you</div></div>"
+        if rv.procedure and rv.procedure.steps and rv.audit:
+            n = len(rv.procedure.steps)
+            chips.append(f"<span><b>{rv.audit.coverage*100:.0f}%</b> of steps matched</span>")
+            chips.append(f"<span><b>{len(rv.audit.findings)}</b> divergences flagged</span>")
+            chips.append(f"<span><b>{n}</b> steps captured</span>")
+    else:
+        purpose = (
+            "You have a recording of a task you already do and want to write up. ProCap "
+            "guesses which stretches are <b>golden</b> and which are <b>dross</b>, drafts one "
+            "timed step per kept moment, and lets you retag a wrong guess, add a note to each "
+            "step, and add off-screen steps the recording could not capture. The result is a "
+            "written SOP you can save as a PDF."
+        )
+        if rv.segments is not None and rv.procedure is not None:
+            n_dross = sum(1 for s in rv.segments if s.kind == SegmentKind.DROSS)
+            chips.append(f"<span><b>{len(rv.procedure.steps)}</b> steps drafted</span>")
+            chips.append(f"<span><b>{n_dross}</b> stretch{'es' if n_dross != 1 else ''} dropped</span>")
+            chips.append(f"<span><b>{_fmt_t(rv.duration)}</b> of recording</span>")
+        # The keep/drop call's honesty proof, lifted out of the collapsed evidence panel so it
+        # lands on this tab's first screenful (the full panel still renders below in evidence).
+        if rv.segments is not None and rv.labels:
+            f1 = score_against_labels(rv.segments, rv.labels).get("f1", 0.0)
+            proof = (
+                f'<p class="proof">Measured, not asserted — the keep/drop call scores '
+                f'<b>F1 {f1:.2f}</b> on a labeled clip (in-sample). Full accuracy panel in '
+                "this demo's evidence section below.</p>"
             )
-        else:
-            kf = None
-    if show or (hero_rv and kf is not None):
-        transform = (
-            '<div class="transform">'
-            '<div class="tcard in"><div class="k">Input — a moment from your recording</div>'
-            f'<img src="{_img_src((show[0] if show else hero_rv).name, kf)}" alt="recording frame">'
-            f'<div class="meta">screen at {_fmt_t(kf.t)}</div></div>'
-            f'<div class="tarrow">→</div>{out}</div>'
-        )
+    chip_html = f'<div class="steps-of">{"".join(chips)}</div>' if chips else ""
+    return (
+        '<section class="demointro">'
+        f'<h2>Demo {letter} · {_esc(name)}</h2>'
+        f'<p class="purpose">{purpose}</p>{chip_html}{proof}</section>'
+    )
 
-    flow = (
-        '<div class="flow">'
-        "<span><b>1</b> Record your screen</span>"
-        "<span><b>2</b> <code>procap run</code></span>"
-        "<span><b>3</b> Review the draft (this page)</span>"
-        "<span><b>4</b> Export the <code>.md</code> procedure</span>"
+
+def _render_about(rv: RunView) -> str:
+    """One product-level block: what ProCap is, the two domain terms (a one-liner each), and
+    the deeper 'how it works' / FAQ as nested collapsibles. Always-true, shared by both demos."""
+    why = (
+        "ProCap turns a screen recording of a technical GUI — operating a machine, a lab "
+        "instrument, a control panel — into a written, time-estimated procedure, and can "
+        "check that procedure against an existing SOP."
+    )
+    gloss = (
+        '<div class="gloss">'
+        '<span><b><i style="background:var(--golden)"></i>Golden</b> — a consequential action, '
+        "kept as a step.</span>"
+        '<span><b><i style="background:var(--dross)"></i>Dross</b> — a mis-click, mouse wander, '
+        "or dead time, dropped.</span>"
         "</div>"
     )
     return (
-        '<section class="hero">'
-        '<button id="hero-toggle" class="hero-toggle" type="button">Hide intro ▴</button>'
-        '<h2>Turn a screen recording into a written procedure</h2>'
-        f'<p class="pitch">{pitch}</p>{trim}{transform}{flow}</section>'
+        '<section class="about"><h2>What ProCap does</h2>'
+        f'<p class="why">{why}</p>{gloss}'
+        f"{_render_how(rv)}{_render_faq(rv)}</section>"
     )
+
+
+def _render_demo_block(rv: RunView) -> str:
+    """One card for the selected demo: the intro header, then the output (the point) leading,
+    then an 'evidence' collapsible holding the upstream pipeline (how ProCap got there)."""
+    intro = _render_demo_intro(rv)
+    if rv.mode == "conformance":
+        primary = _render_audit(rv)
+        supporting = (
+            _render_procedure(rv, interactive=False)
+            + _render_keyframes(rv)
+            + _render_segments(rv)
+        )
+    else:
+        primary = _render_procedure(rv, interactive=True)
+        supporting = _render_keyframes(rv) + _render_segments(rv) + _render_eval(rv)
+    evidence = (
+        '<details class="disc no-print"><summary>How ProCap produced this</summary>'
+        f"{supporting}</details>"
+    )
+    return f'<section class="demoblock">{intro}{primary}{evidence}</section>'
 
 
 def render_page(runs: list[Path], active: Path | None) -> str:
-    runbar = "".join(
-        f'<a class="{"active" if active and p == active else ""}" '
-        f'href="/?run={quote(p.name)}">{_esc(p.name)}</a>'
-        for p in runs
-    )
     if active is None:
-        body = '<p class="empty">No runs found under the runs/ directory. Generate one with <code>procap run &lt;video&gt;</code>.</p>'
+        about = chooser = demo = lightboxes = ""
         sub = ""
     else:
         rv = RunView(active)
@@ -1010,46 +1141,33 @@ def render_page(runs: list[Path], active: Path | None) -> str:
             f'<div class="tag">{_esc(rv.meta.get("source_video", rv.name))} · '
             f'sampled @ {rv.meta.get("fps_sampled", "?")} fps &nbsp; {badge}</div>'
         )
-        body = (
-            '<h2 class="layer-h">Inspect the example, stage by stage</h2>'
-            '<p class="layer-intro">Don\'t take the pitch on faith — here is a real run end '
-            "to end, so you can judge the quality yourself: which moments it kept vs. dropped, "
-            "how accurate that call is against ground truth, how it timed each step, and how it "
-            "audits against an existing written doc.</p>"
-            '<section class="stage"><h2>Overview</h2>'
-            '<p class="lede">A screen recording run through procap: video decomposed into '
-            "keyframes, stretches judged golden or dross, a time-estimated procedure "
-            "synthesized from the golden ones, then audited against a written doc.</p>"
-            f"{_render_stats(rv)}</section>"
-            + _render_keyframes(rv)
-            + _render_segments(rv)
-            + _render_eval(rv)
-            + _render_procedure(rv)
-            + _render_audit(rv)
-            + _render_how(rv)
-            + _render_faq(rv)
-        )
+        about = _render_about(rv)
+        chooser = _render_demo_chooser(runs, active)
+        meta_line = f'<header class="no-print metaline">{sub}</header>'
+        demo = meta_line + _render_demo_block(rv)
+        # Lightbox overlays live at page level so the keyframe filmstrip (now inside a
+        # collapsed evidence <details>) and the procedure thumbnails can both open them.
+        lightboxes = _keyframe_lightboxes(rv)
+    empty = ('<p class="empty">No runs found under the runs/ directory. Generate one with '
+             "<code>procap run &lt;video&gt;</code>.</p>")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>procap demo{(' · ' + _esc(active.name)) if active else ''}</title>
+<title>ProCap demo{(' · ' + _esc(active.name)) if active else ''}</title>
 <style>{CSS}</style></head>
 <body>
-<header class="top"><h1>procap</h1>
-<div class="tag">screen recording → written, time-estimated procedure</div></header>
+<header class="top no-print"><h1>ProCap</h1>
+<div class="tag">turn a screen recording of a GUI task into a written procedure — or check one against an existing SOP</div></header>
 <div class="wrap">
-{_render_hero(runs) if runs else ''}
-{('<div class="runbar"><span class="runbar-label">Example run:</span>' + runbar + '</div>') if runs else ''}
-{('<header style="margin-bottom:16px">' + sub + '</header>') if sub else ''}
-{body}
-<footer>procap demo · stdlib http.server · artifacts under runs/</footer>
+{(about + chooser + demo) if runs else empty}
+{lightboxes}
+<footer class="no-print">ProCap demo · runs entirely offline · artifacts under runs/</footer>
 </div>
 <script>
-/* Progressive enhancement only — the page is fully usable with JS off (lightboxes fall back
-   to :target). Adds: scroll preservation across run-switches, in-place lightbox open/close
-   (no jump to top), and a persistent "hide intro" toggle. No dependencies. */
+/* Progressive enhancement. The page is readable with JS off; this layer adds scroll
+   preservation, in-place lightboxes, the note-taking / conformance editors (in-memory
+   only — edits are not persisted), and print-to-PDF. No dependencies. */
 (function () {{
-  // 1) keep scroll position across the full-page reload a run-switch triggers
   try {{
     var SK = "procap-scroll";
     var y = sessionStorage.getItem(SK);
@@ -1059,7 +1177,38 @@ def render_page(runs: list[Path], active: Path | None) -> str:
     }});
   }} catch (e) {{}}
 
-  // 2) lightbox open/close without changing the hash (so the page never scrolls to top)
+  function retag(step) {{
+    if (!step) return;
+    var next = step.getAttribute("data-kind") === "dross" ? "golden" : "dross";
+    step.setAttribute("data-kind", next);
+    step.classList.toggle("golden", next === "golden");
+    step.classList.toggle("dross", next === "dross");
+    var s = step.querySelector(".tag-state");
+    if (s) s.textContent = next === "golden" ? "golden — kept" : "dross — dropped";
+    var b = step.querySelector("[data-retag]");
+    if (b) b.textContent = next === "golden" ? "Retag as dross" : "Retag as golden";
+  }}
+  function addBlank(btn) {{
+    var tpl = document.getElementById("blankstep-tpl");
+    var editor = btn.closest("[data-editor]");
+    if (!tpl || !editor) return;
+    editor.insertBefore(tpl.content.firstElementChild.cloneNode(true), tpl);
+  }}
+  function verdict(f, state) {{
+    if (!f) return;
+    var same = f.getAttribute("data-verdict") === state;
+    var now = same ? "" : state;
+    if (now) f.setAttribute("data-verdict", now); else f.removeAttribute("data-verdict");
+    f.classList.toggle("confirmed", now === "confirmed");
+    f.classList.toggle("denied", now === "denied");
+    var cb = f.querySelector("[data-confirm]"), db = f.querySelector("[data-deny]");
+    if (cb) cb.classList.toggle("active", now === "confirmed");
+    if (db) db.classList.toggle("active", now === "denied");
+    var v = f.querySelector("[data-vstate]");
+    if (v) v.textContent = now === "confirmed" ? "Confirmed gap"
+                          : now === "denied" ? "Dismissed" : "Unreviewed";
+  }}
+
   document.addEventListener("click", function (ev) {{
     var opener = ev.target.closest("a[data-lb]");
     if (opener) {{
@@ -1071,7 +1220,16 @@ def render_page(runs: list[Path], active: Path | None) -> str:
       ev.preventDefault();
       var open = document.querySelector(".lightbox.show");
       if (open) open.classList.remove("show");
+      return;
     }}
+    if (ev.target.closest("[data-retag]")) return retag(ev.target.closest("[data-step]"));
+    if (ev.target.closest("[data-remove]")) {{
+      var s = ev.target.closest("[data-step]"); if (s) s.remove(); return;
+    }}
+    if (ev.target.closest("[data-addblank]")) return addBlank(ev.target.closest("[data-addblank]"));
+    if (ev.target.closest("[data-print]")) return window.print();
+    if (ev.target.closest("[data-confirm]")) return verdict(ev.target.closest("[data-finding]"), "confirmed");
+    if (ev.target.closest("[data-deny]")) return verdict(ev.target.closest("[data-finding]"), "denied");
   }});
   document.addEventListener("keydown", function (ev) {{
     if (ev.key === "Escape") {{
@@ -1079,25 +1237,6 @@ def render_page(runs: list[Path], active: Path | None) -> str:
       if (open) open.classList.remove("show");
     }}
   }});
-
-  // 3) persistent "hide intro" toggle
-  try {{
-    var HK = "procap-hero-hidden";
-    var hero = document.querySelector(".hero");
-    var btn = document.getElementById("hero-toggle");
-    function apply(h) {{
-      if (hero) hero.classList.toggle("collapsed", h);
-      if (btn) btn.textContent = h ? "Show intro ▾" : "Hide intro ▴";
-    }}
-    if (btn) {{
-      apply(localStorage.getItem(HK) === "1");
-      btn.addEventListener("click", function () {{
-        var h = localStorage.getItem(HK) !== "1";
-        localStorage.setItem(HK, h ? "1" : "0");
-        apply(h);
-      }});
-    }}
-  }} catch (e) {{}}
 }})();
 </script>
 </body></html>"""

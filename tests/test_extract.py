@@ -1,12 +1,13 @@
-"""Stage 1: the synthetic clip has 7 scripted scenes that collapse to 6 distinct held
-states (the mouse-wander stretch is the same panel as the pump scene, so no new keyframe).
-The keyframer should recover those distinct states, not the wander."""
+"""Stage 1: the synthetic clip has 10 scripted scenes that collapse to 9 distinct held
+states (the mouse-wander stretch is the same panel as the revert-valve scene, so no new
+keyframe). The keyframer should recover those distinct states, not the wander."""
 
 
 def test_keyframe_count_matches_distinct_states(extracted_run):
     kfs = extracted_run.read_keyframes()
-    # 6 distinct states: idle, pump(+wander merged), settings, revert-pump, valve, flow.
-    assert 5 <= len(kfs) <= 7, [f"{k.t}-{k.t_end}" for k in kfs]
+    # 9 distinct states: idle, pump, valve, settings, revert-valve(+wander merged),
+    # flow, heater, temp, logging.
+    assert 8 <= len(kfs) <= 10, [f"{k.t}-{k.t_end}" for k in kfs]
 
 
 def test_timestamps_monotonic_and_contiguous(extracted_run):
@@ -17,7 +18,7 @@ def test_timestamps_monotonic_and_contiguous(extracted_run):
 
 
 def test_no_keyframe_for_pure_mouse_wander(extracted_run):
-    """The 4-7s wander stretch must not spawn its own keyframe — it is the pump state."""
+    """The 10-13s wander stretch must not spawn its own keyframe — it is the valve state."""
     kfs = extracted_run.read_keyframes()
     starts = [round(k.t) for k in kfs]
-    assert 5 not in starts and 6 not in starts, starts
+    assert 11 not in starts and 12 not in starts, starts
