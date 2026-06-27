@@ -1,0 +1,57 @@
+name: Deploy demo to Pages
+
+# Builds the static ProCap demo from source on every push to main and publishes it to
+# GitHub Pages. Nothing generated is committed: the synthetic corpus, the pipeline runs,
+# and the static site are all regenerated here (see tools/build_static.py), so the live
+# site always reflects the current code + heuristics (VLM off — no API key in CI).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let a newer push supersede an in-flight run.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ffmpeg + DejaVu fonts
+        # ffmpeg: keyframe extraction + synthetic clip encode. DejaVu: the synthetic frames
+        # render text with it; a different font shifts pixels and changes keyframe detection.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - name: Install ProCap
+        run: pip install -e .
+      - name: Generate corpus + runs
+        run: |
+          python corpus/make_synthetic.py
+          python -m procap.cli run corpus/synthetic/labeled_demo.mp4   # -> runs/labeled_demo (note-taking)
+          python corpus/make_audit_demo.py                            # -> runs/audit_demo (conformance)
+      - name: Build static site
+        run: python tools/build_static.py --runs runs --out site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
