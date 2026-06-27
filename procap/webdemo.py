@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import html
 import json
+import re
+import shutil
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
@@ -30,9 +33,17 @@ from urllib.parse import urlparse, parse_qs, quote
 from .model import (
     Procedure, Segment, Keyframe, AuditReport, SegmentKind, FindingKind, AuditMethod,
 )
+from .audit import parse_written_steps
 from .eval import score_against_labels
+from .run import Run
 
 EVAL_STEP = 0.1  # time-grid resolution the scorer uses; reused to convert grid points -> seconds
+
+# Upload limits (the demo accepts user recordings via POST /run — see make_handler).
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024            # cap the in-memory request body
+MAX_UPLOADS_KEPT = 5                            # prune older upload_* runs beyond this
+_ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+_DISPOSITION_RE = re.compile(rb'name="([^"]*)"(?:; *filename="([^"]*)")?')
 
 # ---------------------------------------------------------------------------
 # Artifact loading (tolerant: a run mid-pipeline is missing later stages)
@@ -101,20 +112,38 @@ class RunView:
     @property
     def mode(self) -> str:
         """Which of the two demos this run drives, decided structurally (not by name):
-        - "conformance" (Demo B): the run carries a *content* audit (lexical/VLM) against a
-          provided SOP — the workflow is qualifying a recording against that doc.
-        - "notetaking" (Demo A): no content audit — the workflow is documenting an existing
-          procedure into an SOP, guessing golden/dross for the operator to retag and annotate.
-        A run with only a structural (count) audit is still note-taking: nothing to match yet."""
-        if self.audit and self.audit.method in (
-            AuditMethod.LEXICAL.value, AuditMethod.VLM.value
-        ):
-            return "conformance"
-        return "notetaking"
+        - "conformance": the run carries an audit against a provided SOP — the workflow is
+          qualifying a recording against that doc. The audit *method* (vlm/lexical/count)
+          bounds what the review can find, and _render_audit states that honestly; even a
+          count-only audit belongs here, because the user provided an SOP to check against.
+        - "notetaking": no audit at all — the workflow is documenting a recording into a new
+          SOP, guessing golden/dross for the operator to retag and annotate.
+
+        Rationale (2026-06-27): previously a count-only audit routed to note-taking, which hid
+        an uploaded user's SOP entirely when no VLM key was set. Routing any audited run to
+        conformance keeps the user's intent (check against my SOP) and shows the doc + an
+        honest 'needs a VLM for content matching' note instead of silently dropping it."""
+        return "conformance" if self.audit is not None else "notetaking"
 
     @property
     def keyframe_by_index(self) -> dict[int, Keyframe]:
         return {k.index: k for k in self.keyframes}
+
+    def written_doc_text(self) -> str | None:
+        """The body of the SOP this run was audited against, or None if unavailable.
+
+        `AuditReport.written_doc` is only a path. Resolve it robustly: as given (cwd),
+        then by basename inside the run dir (where the upload path saves a copy), so the
+        reference document renders regardless of the server's working directory."""
+        if not self.audit or not self.audit.written_doc:
+            return None
+        for cand in (Path(self.audit.written_doc), self.dir / Path(self.audit.written_doc).name):
+            try:
+                if cand.exists():
+                    return cand.read_text()
+            except OSError:
+                continue
+        return None
 
     @property
     def duration(self) -> float:
@@ -198,6 +227,23 @@ header.top .tag { color: #8b949e; font-size: 13px; margin-top: 3px; }
 .findgroup .muted { font-weight: 400; }
 .auditcount { font-size: 15px; margin: 6px 0 4px; }
 .empty { color: var(--muted); font-style: italic; }
+
+/* reference SOP panel — the document being checked, rendered on the page */
+.sopdoc { border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px 14px; margin: 14px 0 4px; background: #fcfcfd; }
+.sopdoc h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+.sopdoc ol { margin: 0; padding-left: 26px; font-size: 13.5px; }
+.sopdoc li { margin: 4px 0; padding: 2px 6px; border-radius: 6px; }
+.sopdoc li.flag { background: #fffaf0; box-shadow: inset 3px 0 0 var(--warn); }
+.sopdoc li .ftag { display: inline-block; margin-left: 8px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; color: var(--warn); }
+/* per-finding side-by-side: written doc vs what the recording showed */
+.finding .fcols { display: flex; gap: 14px; margin-top: 8px; align-items: flex-start; }
+.finding .fcol { flex: 1 1 0; min-width: 0; }
+.finding .fcol .hdr { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; color: var(--muted); margin-bottom: 3px; }
+.finding .recbody { display: flex; gap: 9px; align-items: flex-start; }
+.finding .recbody img { width: 104px; height: 65px; object-fit: cover; border-radius: 6px; border: 2px solid var(--golden); flex: 0 0 auto; }
+.finding .nofrm { color: var(--muted); font-style: italic; font-size: 12.5px; }
+.finding .why { margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+@media (max-width: 640px) { .finding .fcols { flex-direction: column; } }
 .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .3px; vertical-align: 1px; }
 .badge.vlm-on { background: #1a7f37; color: #fff; }
 .badge.vlm-off { background: #3a3f44; color: #ffd33d; border: 1px solid #ffd33d; }
@@ -247,6 +293,24 @@ dl.faq dd { margin: 4px 0 0; color: #2c333a; font-size: 13.8px; }
 .gloss span { color: var(--muted); }
 .gloss b { color: var(--ink); }
 .gloss b i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: 0; }
+
+/* upload: run your own recording */
+.upload { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 24px; margin: 0 0 20px; }
+.upload > h2 { margin: 0 0 4px; font-size: 18px; }
+.upload .lede { color: var(--muted); font-size: 13.5px; margin: 0 0 14px; max-width: 80ch; }
+.upload .row { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
+.upload .fld { flex: 1 1 300px; }
+.upload label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin: 0 0 5px; }
+.upload input[type=file] { font: inherit; font-size: 13px; max-width: 100%; }
+.upload textarea { width: 100%; min-height: 110px; font: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; resize: vertical; }
+.upload .hint { font-size: 12px; color: var(--muted); margin: 5px 0 0; }
+.upload .actions { margin-top: 16px; }
+#proc-overlay { position: fixed; inset: 0; background: rgba(13,17,23,.86); color: #e6edf3; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 16px; text-align: center; padding: 24px; z-index: 80; }
+#proc-overlay.show { display: flex; }
+#proc-overlay .spin { width: 42px; height: 42px; border: 4px solid rgba(255,255,255,.25); border-top-color: #fff; border-radius: 50%; animation: spin 1s linear infinite; }
+#proc-overlay .sub { font-size: 13px; color: #8b949e; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* nested collapsibles inside about/demoblock shed their own card chrome */
 .about .disc, .demoblock .disc { border: none; border-top: 1px solid var(--line); border-radius: 0; padding: 0; margin: 6px 0 0; background: transparent; }
 .about .disc > summary, .demoblock .disc > summary { font-size: 14px; padding: 11px 0 7px; }
@@ -325,6 +389,8 @@ dl.faq dd { margin: 4px 0 0; color: #2c333a; font-size: 13.8px; }
   .step { break-inside: avoid; page-break-inside: avoid; border-bottom: 1px solid #ddd; }
   .step.dross { display: none !important; }  /* retagged-out steps leave the exported SOP */
   .step.dross .num { background: var(--ink); }
+  .finding.denied { display: none !important; }  /* dismissed gaps leave the exported review */
+  .sopdoc { background: #fff; }
   .notes { border: none; padding: 4px 0; min-height: 0; resize: none; }
   .finding { break-inside: avoid; page-break-inside: avoid; }
   .printtitle { display: block !important; font-size: 22px; font-weight: 700; margin: 0 0 4px; }
@@ -640,6 +706,7 @@ _BLANK_STEP_TEMPLATE = (
     '<div class="meta">no screen frame — manual entry</div>'
     '<div class="tagrow no-print"><span class="tag-state">golden — kept</span>'
     '<button type="button" class="retag" data-retag>Retag as dross</button>'
+    '<button type="button" class="retag" data-insert-below>+ Insert step below</button>'
     '<button type="button" class="retag" data-remove>Remove</button></div>'
     '<textarea class="notes" data-notes placeholder="Describe the off-screen work the '
     'recording could not capture (e.g. a physical action at the bench)…"></textarea></div>'
@@ -682,7 +749,8 @@ def _render_procedure(rv: RunView, interactive: bool = False) -> str:
                 '<div class="body">'
                 f"<h3>{heading}</h3>{meta}"
                 '<div class="tagrow no-print"><span class="tag-state">golden — kept</span>'
-                '<button type="button" class="retag" data-retag>Retag as dross</button></div>'
+                '<button type="button" class="retag" data-retag>Retag as dross</button>'
+                '<button type="button" class="retag" data-insert-below>+ Insert step below</button></div>'
                 '<textarea class="notes" data-notes placeholder="Add a note for this step…">'
                 f"{notes}</textarea></div>"
                 f'<div class="thumbs">{thumbs}</div>'
@@ -703,11 +771,12 @@ def _render_procedure(rv: RunView, interactive: bool = False) -> str:
         lede = (
             "ProCap drafted one ordered step per kept (golden) moment, timed from the "
             "recording. Retag any step it misjudged, add a note to each, and add off-screen "
-            "steps for work the recording could not capture — then save the result as a PDF."
+            "steps for work the recording could not capture — at the end, or below any step "
+            "with <b>Insert step below</b> — then save the result as a PDF."
         )
         toolbar = (
             '<div class="toolbar no-print">'
-            '<button type="button" class="btn" data-addblank>+ Add off-screen step</button>'
+            '<button type="button" class="btn" data-addblank>+ Add off-screen step at end</button>'
             '<button type="button" class="btn primary" data-print>Save as PDF</button></div>'
         )
         title_block = (
@@ -747,6 +816,87 @@ _FINDING_GROUPS = [
      "A step your SOP mentions, but only sketchily given what the recording shows."),
 ]
 
+# kind -> short label, for tagging flagged steps in the rendered reference SOP.
+_FINDING_LABELS = {kind: label for kind, label, _ in _FINDING_GROUPS}
+
+
+def _step_first_keyframe(rv: RunView, step_index_0: int) -> Keyframe | None:
+    """The first available keyframe a 0-based procedure step was built from — the screencap
+    that shows what the recording actually did at that step."""
+    if rv.procedure is None or not (0 <= step_index_0 < len(rv.procedure.steps)):
+        return None
+    kbi = rv.keyframe_by_index
+    for ki in rv.procedure.steps[step_index_0].keyframe_indexes:
+        if ki in kbi:
+            return kbi[ki]
+    return None
+
+
+def _finding_row(rv: RunView, f, verdict_html: str) -> str:
+    """One finding rendered as a side-by-side: what the SOP says vs. what the recording
+    showed (with the actual screencap), then the rationale. This is the actionable form —
+    an author can see the divergence, not just be told a step number."""
+    # Left column: the written-doc side.
+    if f.doc_ref:
+        doc_body = _esc(f.doc_ref)
+    else:
+        doc_body = '<span class="nofrm">— no matching step in your SOP —</span>'
+    doc_col = f'<div class="fcol"><div class="hdr">Your SOP says</div>{doc_body}</div>'
+
+    # Right column: the recording side, with the screencap when the finding maps to a step.
+    if f.procedure_step_index is not None:
+        st = (rv.procedure.steps[f.procedure_step_index]
+              if rv.procedure and f.procedure_step_index < len(rv.procedure.steps) else None)
+        kf = _step_first_keyframe(rv, f.procedure_step_index)
+        img = ""
+        if kf is not None:
+            img = (f'<a href="#kf-{rv.name}-{kf.index}" data-lb="kf-{rv.name}-{kf.index}">'
+                   f'<img src="{_img_src(rv.name, kf)}" alt="recording at step '
+                   f'{f.procedure_step_index + 1}"></a>')
+        cap = ""
+        if st is not None:
+            cap = f"<div><b>Step {st.index + 1}: {_esc(st.title)}</b>"
+            if st.description:
+                cap += f'<br><span class="muted">{_esc(st.description)}</span>'
+            cap += "</div>"
+        rec_col = (f'<div class="fcol"><div class="hdr">Recording showed</div>'
+                   f'<div class="recbody">{img}{cap}</div></div>')
+    else:
+        rec_col = ('<div class="fcol"><div class="hdr">Recording showed</div>'
+                   '<span class="nofrm">never seen in the recording</span></div>')
+
+    return (
+        '<div class="finding" data-finding>'
+        f'<div class="fcols">{doc_col}{rec_col}</div>'
+        f'<div class="why">{_esc(f.detail)}</div>{verdict_html}</div>'
+    )
+
+
+def _render_reference_sop(rv: RunView) -> str:
+    """Render the SOP being audited against, with flagged steps highlighted. The reference
+    document was never shown before — without it a divergence can't be judged."""
+    text = rv.written_doc_text()
+    if not text:
+        return ""
+    doc_steps = parse_written_steps(text)
+    if not doc_steps:
+        return ""
+    # Which doc steps a finding touches (findings carry the doc step text in doc_ref).
+    flagged: dict[str, str] = {}
+    for f, label in ((f, _FINDING_LABELS.get(f.kind, "flagged")) for f in rv.audit.findings):
+        if f.doc_ref:
+            flagged[f.doc_ref] = label
+    items = []
+    for t in doc_steps:
+        tag = flagged.get(t)
+        cls = ' class="flag"' if tag else ""
+        tag_html = f'<span class="ftag">{_esc(tag)}</span>' if tag else ""
+        items.append(f"<li{cls}>{_esc(t)}{tag_html}</li>")
+    return (
+        '<div class="sopdoc"><h3>The SOP being checked</h3>'
+        f'<ol>{"".join(items)}</ol></div>'
+    )
+
 
 def _render_audit(rv: RunView) -> str:
     if rv.audit is None:
@@ -767,14 +917,7 @@ def _render_audit(rv: RunView) -> str:
             '<button type="button" class="vbtn on-deny no-print" data-deny>Not a gap</button>'
             '<span class="vstate" data-vstate>Unreviewed</span></div>'
         )
-        rows = "".join(
-            '<div class="finding" data-finding>'
-            f'<div class="k">{_esc(label)}'
-            f'{" · step " + str(f.procedure_step_index + 1) if f.procedure_step_index is not None else ""}'
-            f'{" · " + _esc(f.doc_ref) if f.doc_ref else ""}</div>'
-            f"{_esc(f.detail)}{verdict}</div>"
-            for f in items
-        )
+        rows = "".join(_finding_row(rv, f, verdict) for f in items)
         groups_html.append(
             f'<h3 class="findgroup" title="{tip}">{_esc(label)} '
             f'<span class="muted">({len(items)})</span></h3>{rows}'
@@ -784,11 +927,14 @@ def _render_audit(rv: RunView) -> str:
     else:
         fin = '<p class="empty">No gaps found — your written doc covers every step the recording shows.</p>'
 
+    sop_panel = _render_reference_sop(rv)
+
     # The recording is the reference; the written doc is what's being checked against it.
     ref_line = (
         '<p class="lede no-print">The recording is treated as the reference. ProCap matched '
-        "each step it captured against the provided SOP and flagged where they diverge. "
-        "Confirm or dismiss each flag, then save the reviewed result as a PDF.</p>"
+        "each step it captured against the provided SOP and flagged where they diverge — each "
+        "flag shows the SOP wording beside the actual screencap. Confirm or dismiss each, then "
+        "save the reviewed result as a PDF.</p>"
     )
 
     # Plain count, never a grade-colored percentage. covered = generated steps the doc covers.
@@ -807,12 +953,12 @@ def _render_audit(rv: RunView) -> str:
     # (audit.py records AuditReport.method) — never present a count ratio as a content audit.
     doc = _esc(rv.audit.written_doc)
     method = rv.audit.method
-    if method == "vlm":
+    if method == AuditMethod.VLM.value:
         method_line = (
             f"<b>VLM content match</b> against <code>{doc}</code>: each generated step matched "
             "to the doc step describing the same action by meaning."
         )
-    elif method == "lexical":
+    elif method == AuditMethod.LEXICAL.value:
         floor = rv.meta.get("match_floor")
         floor_txt = f" (match floor {floor})" if floor is not None else ""
         method_line = (
@@ -837,11 +983,22 @@ def _render_audit(rv: RunView) -> str:
                 else ""
             )
         )
+    # Honesty on the order check: it is a greedy monotonic comparison, not full alignment.
+    order_caveat = ""
+    if by_kind.get(FindingKind.OUT_OF_ORDER.value):
+        order_caveat = (
+            '<p class="no-print" style="margin:6px 0 0;font-size:12px;color:var(--muted)">'
+            "<b>On ordering:</b> each captured step is matched to its best SOP step, then flagged "
+            "if that match falls earlier than one already seen — a greedy left-to-right check, "
+            "not full sequence alignment. When two steps are swapped it flags the later one, "
+            "which may not be the step actually misplaced. Treat it as a pointer to re-read, not "
+            "a verdict on which step moved.</p>"
+        )
     method_html = (
         f'<p class="no-print" style="margin:8px 0 0;font-size:12px;color:var(--muted)">{method_line}</p>'
     )
     toolbar = (
-        '<div class="toolbar no-print">'
+        '<div class="toolbar no-print" style="margin-top:18px">'
         '<button type="button" class="btn primary" data-print>Save as PDF</button></div>'
     )
     title_block = (
@@ -852,7 +1009,8 @@ def _render_audit(rv: RunView) -> str:
     return (
         '<section class="stage" id="stage-audit" data-review><h2>'
         "Conformance against the provided SOP</h2>"
-        f"{ref_line}{toolbar}{title_block}{gap}{fin}{method_html}</section>"
+        f"{ref_line}{title_block}{gap}{sop_panel}{fin}{order_caveat}{method_html}"
+        f"{toolbar}</section>"
     )
 
 
@@ -1009,23 +1167,28 @@ def _default_active(runs: list[Path]) -> Path | None:
 
 
 def _demo_label(rv: RunView) -> tuple[str, str, str]:
-    """(letter, name, one-line purpose) for the run's demo, by its structural mode. The cards
-    render conformance-first (sorted run order), so conformance carries the 'A' label and the
-    pair reads A → B left to right."""
+    """(badge, name, one-line purpose) for the run, by its structural mode. The two canned
+    runs carry 'Demo A' (conformance, the first card) / 'Demo B' (note-taking) so the pair
+    reads A → B; a user's uploaded run reads 'Your run' so it doesn't duplicate the letters."""
+    mine = rv.name.startswith("upload_")
     if rv.mode == "conformance":
-        return ("A", "Qualify against an SOP", "Recording vs a provided SOP")
-    return ("B", "Document a procedure", "Recording → a written SOP")
+        return ("Your run" if mine else "Demo A",
+                "Conformance review" if mine else "Qualify against an SOP",
+                "Your recording vs your SOP" if mine else "Recording vs a provided SOP")
+    return ("Your run" if mine else "Demo B",
+            "Drafted procedure" if mine else "Document a procedure",
+            "Your recording → a written SOP" if mine else "Recording → a written SOP")
 
 
 def _render_demo_chooser(runs: list[Path], active: Path | None) -> str:
     """Two cards, one per run, each naming its demo and purpose (not the raw run dir name)."""
     cards = []
     for p in runs:
-        letter, name, sub = _demo_label(RunView(p))
+        badge, name, sub = _demo_label(RunView(p))
         on = " active" if active and p == active else ""
         cards.append(
             f'<a class="card{on}" href="/?run={quote(p.name)}">'
-            f'<span class="dlabel">Demo {letter}</span>'
+            f'<span class="dlabel">{_esc(badge)}</span>'
             f'<span class="dname">{_esc(name)}</span>'
             f'<span class="dsub">{_esc(sub)}</span></a>'
         )
@@ -1034,7 +1197,7 @@ def _render_demo_chooser(runs: list[Path], active: Path | None) -> str:
 
 def _render_demo_intro(rv: RunView) -> str:
     """The purpose of THIS demo and what its controls do — distinct per mode."""
-    letter, name, _sub = _demo_label(rv)
+    badge, name, _sub = _demo_label(rv)
     chips = []
     proof = ""  # honesty line, promoted onto the first screenful of the tab that owns it
     if rv.mode == "conformance":
@@ -1075,7 +1238,7 @@ def _render_demo_intro(rv: RunView) -> str:
     chip_html = f'<div class="steps-of">{"".join(chips)}</div>' if chips else ""
     return (
         '<section class="demointro">'
-        f'<h2>Demo {letter} · {_esc(name)}</h2>'
+        f'<h2>{_esc(badge)} · {_esc(name)}</h2>'
         f'<p class="purpose">{purpose}</p>{chip_html}{proof}</section>'
     )
 
@@ -1100,6 +1263,32 @@ def _render_about(rv: RunView) -> str:
         '<section class="about"><h2>What ProCap does</h2>'
         f'<p class="why">{why}</p>{gloss}'
         f"{_render_how(rv)}{_render_faq(rv)}</section>"
+    )
+
+
+def _render_upload() -> str:
+    """The 'run your own' panel: upload a recording (+ optional SOP) and ProCap runs the full
+    pipeline on it server-side, then redirects to the result. This is what makes Save-as-PDF a
+    real artifact rather than a copy of a canned demo."""
+    return (
+        '<section class="upload no-print"><h2>Run your own recording</h2>'
+        '<p class="lede">Upload a screen recording of a GUI task — ProCap runs the full '
+        "pipeline on it (keyframes → golden/dross → a timed draft procedure). Add an existing "
+        "SOP and it returns a conformance review against that doc instead. Everything runs "
+        "locally; nothing leaves this machine.</p>"
+        '<form method="post" action="/run" enctype="multipart/form-data" data-uploadform>'
+        '<div class="row">'
+        '<div class="fld"><label for="up-video">Recording (required)</label>'
+        '<input id="up-video" type="file" name="video" accept="video/*" required>'
+        '<p class="hint">mp4 / mov / webm / mkv, up to 50&nbsp;MB. A short clip processes fastest.</p>'
+        "</div>"
+        '<div class="fld"><label for="up-sop">Existing SOP (optional)</label>'
+        '<textarea id="up-sop" name="sop" placeholder="Paste a numbered written procedure to '
+        'audit the recording against it. Leave blank to just draft a new one."></textarea>'
+        '<p class="hint">One step per line, or a numbered list.</p></div>'
+        "</div>"
+        '<div class="actions"><button type="submit" class="btn primary">Run ProCap</button></div>'
+        "</form></section>"
     )
 
 
@@ -1148,8 +1337,9 @@ def render_page(runs: list[Path], active: Path | None) -> str:
         # Lightbox overlays live at page level so the keyframe filmstrip (now inside a
         # collapsed evidence <details>) and the procedure thumbnails can both open them.
         lightboxes = _keyframe_lightboxes(rv)
-    empty = ('<p class="empty">No runs found under the runs/ directory. Generate one with '
+    empty = ('<p class="empty">No runs yet — upload a recording above, or generate one with '
              "<code>procap run &lt;video&gt;</code>.</p>")
+    upload = _render_upload()
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1158,8 +1348,12 @@ def render_page(runs: list[Path], active: Path | None) -> str:
 <body>
 <header class="top no-print"><h1>ProCap</h1>
 <div class="tag">turn a screen recording of a GUI task into a written procedure — or check one against an existing SOP</div></header>
+<div id="proc-overlay" aria-hidden="true"><div class="spin"></div>
+<div>Running ProCap on your recording…<div class="sub">extracting keyframes, classifying golden/dross, drafting — this can take a moment</div></div></div>
 <div class="wrap">
-{(about + chooser + demo) if runs else empty}
+{about if runs else ''}
+{upload}
+{(chooser + demo) if runs else empty}
 {lightboxes}
 <footer class="no-print">ProCap demo · runs entirely offline · artifacts under runs/</footer>
 </div>
@@ -1188,11 +1382,21 @@ def render_page(runs: list[Path], active: Path | None) -> str:
     var b = step.querySelector("[data-retag]");
     if (b) b.textContent = next === "golden" ? "Retag as dross" : "Retag as golden";
   }}
-  function addBlank(btn) {{
+  function newBlankStep() {{
+    var tpl = document.getElementById("blankstep-tpl");
+    return tpl ? tpl.content.firstElementChild.cloneNode(true) : null;
+  }}
+  function addBlank(btn) {{  // toolbar: append at the end (before the <template>)
     var tpl = document.getElementById("blankstep-tpl");
     var editor = btn.closest("[data-editor]");
-    if (!tpl || !editor) return;
-    editor.insertBefore(tpl.content.firstElementChild.cloneNode(true), tpl);
+    var node = newBlankStep();
+    if (!tpl || !editor || !node) return;
+    editor.insertBefore(node, tpl);
+  }}
+  function insertBelow(step) {{  // per-step: insert directly after the chosen step
+    var node = newBlankStep();
+    if (!step || !node || !step.parentNode) return;
+    step.parentNode.insertBefore(node, step.nextSibling);
   }}
   function verdict(f, state) {{
     if (!f) return;
@@ -1227,6 +1431,7 @@ def render_page(runs: list[Path], active: Path | None) -> str:
       var s = ev.target.closest("[data-step]"); if (s) s.remove(); return;
     }}
     if (ev.target.closest("[data-addblank]")) return addBlank(ev.target.closest("[data-addblank]"));
+    if (ev.target.closest("[data-insert-below]")) return insertBelow(ev.target.closest("[data-step]"));
     if (ev.target.closest("[data-print]")) return window.print();
     if (ev.target.closest("[data-confirm]")) return verdict(ev.target.closest("[data-finding]"), "confirmed");
     if (ev.target.closest("[data-deny]")) return verdict(ev.target.closest("[data-finding]"), "denied");
@@ -1237,9 +1442,97 @@ def render_page(runs: list[Path], active: Path | None) -> str:
       if (open) open.classList.remove("show");
     }}
   }});
+
+  // Upload: client-side size guard, then show the processing overlay (the POST is synchronous).
+  var MAX_BYTES = {MAX_UPLOAD_BYTES};
+  document.addEventListener("submit", function (ev) {{
+    var form = ev.target.closest("[data-uploadform]");
+    if (!form) return;
+    var fi = form.querySelector('input[type=file]');
+    if (fi && fi.files && fi.files[0] && fi.files[0].size > MAX_BYTES) {{
+      ev.preventDefault();
+      alert("That recording is larger than the 50 MB limit. Trim it or use a shorter clip.");
+      return;
+    }}
+    var ov = document.getElementById("proc-overlay");
+    if (ov) ov.classList.add("show");
+  }});
 }})();
 </script>
 </body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Upload handling (POST /run): user recording -> full pipeline -> new run dir
+# ---------------------------------------------------------------------------
+
+
+def _parse_multipart(body: bytes, boundary: bytes) -> dict[str, dict]:
+    """Minimal multipart/form-data parser, stdlib-only (the `cgi` module is deprecated and
+    removed in 3.13). Returns {field_name: {"filename": str|None, "data": bytes}}. Scoped to
+    this demo's one-file + one-text-field form — not an RFC-complete implementation.
+
+    Framing: parts are separated by `--boundary`; each part is `\\r\\n`<headers>`\\r\\n\\r\\n`<data>
+    with a trailing `\\r\\n` before the next separator. Exactly one leading and one trailing
+    `\\r\\n` are stripped so binary payloads ending in CR/LF survive intact."""
+    out: dict[str, dict] = {}
+    for part in body.split(b"--" + boundary):
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        if not part or part == b"--":
+            continue
+        head, sep, data = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        name = filename = None
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-disposition:"):
+                m = _DISPOSITION_RE.search(line)
+                if m:
+                    name = m.group(1).decode("utf-8", "replace")
+                    if m.group(2) is not None:
+                        filename = m.group(2).decode("utf-8", "replace")
+        if name is not None:
+            out[name] = {"filename": filename, "data": data}
+    return out
+
+
+def _prune_uploads(base: Path, keep: int = MAX_UPLOADS_KEPT) -> None:
+    """Keep only the most recent `keep` upload_* runs (names are timestamp-sortable)."""
+    uploads = sorted((p for p in base.glob("upload_*") if p.is_dir()), reverse=True)
+    for stale in uploads[keep:]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
+def process_upload(base: Path, filename: str, video_bytes: bytes, sop_text: str) -> str:
+    """Persist an uploaded recording (+ optional SOP), run the full pipeline into a fresh
+    `upload_<ts>` run dir, and return its name. Raises on pipeline failure (caller reports)."""
+    from . import cli  # lazy: cli imports webdemo in cmd_serve; avoid an import cycle at load
+
+    base = Path(base)
+    base.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    name, i = f"upload_{ts}", 1
+    while (base / name).exists():
+        name, i = f"upload_{ts}_{i}", i + 1
+    run = Run(base / name).ensure()
+
+    ext = Path(filename).suffix.lower()
+    if ext not in _ALLOWED_VIDEO_EXTS:
+        ext = ".mp4"
+    video_path = run.dir / f"source{ext}"
+    video_path.write_bytes(video_bytes)
+
+    against = None
+    if sop_text.strip():
+        against = run.dir / "written_procedure.md"
+        against.write_text(sop_text)
+
+    cli.run_pipeline(video_path, against=against, run=run)
+    _prune_uploads(base)
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +1552,16 @@ def make_handler(base: Path):
             self.end_headers()
             self.wfile.write(body)
 
+        def _error_page(self, code: int, msg: str):
+            body = (
+                "<!doctype html><meta charset='utf-8'>"
+                "<title>ProCap — upload error</title>"
+                "<body style='font:15px sans-serif;max-width:640px;margin:60px auto;padding:0 20px'>"
+                f"<h2>Couldn't process that recording</h2><p>{_esc(msg)}</p>"
+                "<p><a href='/'>← back to the demo</a></p></body>"
+            )
+            self._send(code, body.encode("utf-8"), "text/html; charset=utf-8")
+
         def do_GET(self):
             parsed = urlparse(self.path)
             qs = parse_qs(parsed.query)
@@ -1267,6 +1570,42 @@ def make_handler(base: Path):
             if parsed.path in ("/", "/index.html"):
                 return self._serve_index(qs)
             self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            if urlparse(self.path).path != "/run":
+                return self._send(404, b"not found", "text/plain")
+            ctype = self.headers.get("Content-Type", "")
+            if "multipart/form-data" not in ctype:
+                return self._error_page(400, "Expected a multipart form upload.")
+            m = re.search(r"boundary=([^;]+)", ctype)
+            if not m:
+                return self._error_page(400, "Malformed upload (no multipart boundary).")
+            boundary = m.group(1).strip().strip('"').encode("utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                length = 0
+            if length <= 0:
+                return self._error_page(400, "Empty upload.")
+            if length > MAX_UPLOAD_BYTES:
+                mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+                return self._error_page(413, f"That recording exceeds the {mb} MB limit.")
+            body = self.rfile.read(length)
+            fields = _parse_multipart(body, boundary)
+            video = fields.get("video")
+            if not video or not video.get("data") or not video.get("filename"):
+                return self._error_page(400, "No video file found in the upload.")
+            sop = fields.get("sop")
+            sop_text = sop["data"].decode("utf-8", "replace") if sop else ""
+            try:
+                name = process_upload(base, video["filename"], video["data"], sop_text)
+            except Exception as exc:  # ffmpeg missing, bad video, etc. — degrade to a message
+                return self._error_page(
+                    500, f"The pipeline failed on that recording: {exc}")
+            self.send_response(303)
+            self.send_header("Location", f"/?run={quote(name)}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _serve_index(self, qs):
             runs = _discover_runs(base)

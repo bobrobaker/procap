@@ -12,15 +12,53 @@ import argparse
 import sys
 from pathlib import Path
 
+from typing import NamedTuple
+
 from . import extract as extract_stage
 from . import golden as golden_stage
 from . import procedure as procedure_stage
 from . import audit as audit_stage
+from .model import AuditReport, Keyframe, Procedure, Segment
 from .run import Run
 
 
 def _resolve_run(arg: str) -> Run:
     return Run(arg)
+
+
+class PipelineResult(NamedTuple):
+    run: Run
+    keyframes: list[Keyframe]
+    segments: list[Segment]
+    procedure: Procedure
+    report: AuditReport | None
+
+
+def run_pipeline(video: str | Path, against: str | Path | None = None,
+                 fps: float = 2.0, run: Run | None = None) -> PipelineResult:
+    """Full pipeline (video -> keyframes -> segments -> procedure [-> audit]).
+
+    The single source of truth for an end-to-end run, shared by `procap run` and the
+    web demo's upload path (procap.webdemo). Writes all artifacts to the run dir and
+    returns the in-memory objects so callers can report without re-reading. Quiet:
+    callers print their own summaries.
+    """
+    run = run or Run.for_video(video)
+    extract_stage.extract_keyframes(video, run=run, fps=fps)
+    kfs = run.read_keyframes()
+    segs = golden_stage.refine_with_vlm(golden_stage.classify(kfs), kfs)
+    run.write_segments(segs)
+    proc = procedure_stage.synthesize(segs, source_video=str(video), keyframes=kfs)
+    run.write_procedure(proc)
+    (run.dir / "procedure.md").write_text(procedure_stage.render_markdown(proc))
+    run.write_meta(**{**run.read_meta(), "max_active_s": procedure_stage.DEFAULT_MAX_ACTIVE_S})
+    report = None
+    if against:
+        report = audit_stage.audit(proc, against)
+        run.write_audit(report)
+        (run.dir / "audit.md").write_text(audit_stage.render_markdown(report))
+        run.write_meta(**{**run.read_meta(), "match_floor": audit_stage.DEFAULT_MATCH_FLOOR})
+    return PipelineResult(run, kfs, segs, proc, report)
 
 
 def cmd_extract(args) -> int:
@@ -68,24 +106,13 @@ def cmd_audit(args) -> int:
 
 
 def cmd_run(args) -> int:
-    run = Run.for_video(args.video)
-    extract_stage.extract_keyframes(args.video, run=run, fps=args.fps)
-    kfs = run.read_keyframes()
-    segs = golden_stage.refine_with_vlm(golden_stage.classify(kfs), kfs)
-    run.write_segments(segs)
-    proc = procedure_stage.synthesize(segs, source_video=str(args.video), keyframes=kfs)
-    run.write_procedure(proc)
-    (run.dir / "procedure.md").write_text(procedure_stage.render_markdown(proc))
-    run.write_meta(**{**run.read_meta(), "max_active_s": procedure_stage.DEFAULT_MAX_ACTIVE_S})
-    print(f"[run] {len(kfs)} keyframes, {sum(1 for s in segs if s.kind=='golden')} golden "
-          f"segments, {len(proc.steps)} steps -> {run.dir}")
-    if args.against:
-        report = audit_stage.audit(proc, args.against)
-        run.write_audit(report)
-        (run.dir / "audit.md").write_text(audit_stage.render_markdown(report))
-        run.write_meta(**{**run.read_meta(), "match_floor": audit_stage.DEFAULT_MATCH_FLOOR})
-        print(f"[run] audit [{report.method}]: {report.coverage * 100:.0f}% coverage, "
-              f"{len(report.findings)} finding(s)")
+    res = run_pipeline(args.video, against=args.against, fps=args.fps)
+    g = sum(1 for s in res.segments if s.kind == "golden")
+    print(f"[run] {len(res.keyframes)} keyframes, {g} golden segments, "
+          f"{len(res.procedure.steps)} steps -> {res.run.dir}")
+    if res.report is not None:
+        print(f"[run] audit [{res.report.method}]: {res.report.coverage * 100:.0f}% coverage, "
+              f"{len(res.report.findings)} finding(s)")
     return 0
 
 
