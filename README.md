@@ -4,6 +4,11 @@ Turn a **screenshare of a technical GUI** (operating a machine, a lab instrument
 panel) into a **time-estimated written procedure** — and audit an existing written procedure
 against what the video actually shows.
 
+**▶ Live demo: https://bobrobaker.github.io/procap/** — two worked runs (draft a procedure;
+qualify a recording against an SOP), rebuilt from source on every push. The keyframe/segment
+evidence, in-browser editing, and Save-as-PDF all run client-side; the upload-your-own-video
+path needs the local server (`procap serve`).
+
 ## Pipeline
 
 ```
